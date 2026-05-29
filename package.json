@@ -1,0 +1,16 @@
+{
+  "name": "obsidian-simpel-checklist",
+  "version": "1.0.0",
+  "description": "Obsidian plugin: side panel todo list",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --watch"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "esbuild": "^0.20.0",
+    "obsidian": "latest",
+    "typescript": "^5.0.0"
+  }
+}

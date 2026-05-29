@@ -1,0 +1,127 @@
+.checklist-container {
+  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.checklist-group {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 4px;
+}
+
+.checklist-group-title {
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  color: var(--text-muted);
+  padding: 6px 12px 2px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.checklist-divider {
+  height: 1px;
+  background-color: var(--background-modifier-border);
+  margin: 6px 12px 4px;
+}
+
+.checklist-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: default;
+}
+
+.checklist-item:hover {
+  background-color: var(--background-modifier-hover);
+}
+
+.checklist-checkbox {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  margin-top: 3px;
+  border: 1.5px solid var(--checkbox-border-color, var(--text-faint));
+  border-radius: var(--checkbox-radius, 3px);
+  cursor: pointer;
+  position: relative;
+  overflow: visible;
+}
+
+.checklist-checkbox:hover {
+  border-color: var(--checkbox-color, var(--interactive-accent));
+  background-color: var(--background-modifier-hover);
+}
+
+.checklist-text {
+  flex: 1;
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  cursor: pointer;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
+.checklist-text:hover {
+  color: var(--text-normal);
+  text-decoration: underline;
+  text-decoration-color: var(--text-faint);
+}
+
+.checklist-inline-link {
+  color: var(--link-color);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.checklist-inline-link:hover {
+  color: var(--link-color-hover);
+  text-decoration: underline;
+}
+
+.checklist-trash {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s, color 0.1s;
+  border-radius: 3px;
+}
+
+.checklist-item:hover .checklist-trash {
+  opacity: 1;
+}
+
+.checklist-trash:hover {
+  color: var(--text-error);
+}
+
+.checklist-empty {
+  padding: 16px 12px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  text-align: center;
+}
+
+/* Confetti particle */
+.checklist-confetti-particle {
+  position: fixed;
+  pointer-events: none;
+  border-radius: 2px;
+  animation: checklist-confetti-fall linear forwards;
+  z-index: 9999;
+}
+
+@keyframes checklist-confetti-fall {
+  0%   { opacity: 1; transform: translateY(0) rotate(0deg); }
+  100% { opacity: 0; transform: translateY(60px) rotate(360deg); }
+}
+

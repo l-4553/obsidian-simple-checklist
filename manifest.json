@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-simpel-checklist",
+  "name": "Simpel Checklist",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Side panel showing all open todos across your vault.",
+  "author": "Lasse",
+  "authorUrl": "https://github.com/l-4553",
+  "isDesktopOnly": false
+}
