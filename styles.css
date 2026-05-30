@@ -67,7 +67,6 @@
 .checklist-text:hover {
   color: var(--text-normal);
   text-decoration: underline;
-  text-decoration-color: var(--text-faint);
 }
 
 .checklist-inline-link {
