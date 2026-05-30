@@ -101,6 +101,23 @@ class ChecklistView extends ItemView {
   async onOpen(): Promise<void> { this.render(); }
   async onClose(): Promise<void> {}
 
+  triggerExternalCompletion(filePath: string, completedTexts: Set<string>): void {
+    for (const [key, row] of this.rowEls) {
+      const parts = key.split("\0");
+      if (parts[0] === filePath && completedTexts.has(parts[1])) {
+        const checkbox = row.querySelector(".checklist-checkbox") as HTMLElement | null;
+        if (checkbox) spawnConfetti(checkbox);
+        const groupEl = row.parentElement;
+        row.remove();
+        this.rowEls.delete(key);
+        if (groupEl && !groupEl.querySelector(".checklist-item")) {
+          groupEl.remove();
+          this.groupEls.delete(filePath);
+        }
+      }
+    }
+  }
+
   render(): void {
     const container = this.containerEl.children[1] as HTMLElement;
     const todos = this.plugin.getAllTodos();
@@ -292,7 +309,35 @@ export default class ChecklistPlugin extends Plugin {
 
     this.registerEvent(this.app.vault.on("modify", async (file) => {
       if (file instanceof TFile && file.extension === "md") {
+        const oldTodos = this.index.get(file.path) ?? [];
         await this.updateIndex(file);
+        const newTexts = new Set((this.index.get(file.path) ?? []).map(t => t.text));
+
+        // Detect todos that disappeared from the index — check if they became [x]
+        const completedTexts = new Set<string>();
+        if (oldTodos.length > 0) {
+          const content = await this.app.vault.cachedRead(file);
+          const lines = content.split("\n");
+          for (const old of oldTodos) {
+            if (!newTexts.has(old.text)) {
+              const lo = Math.max(0, old.lineIndex - 2);
+              const hi = Math.min(lines.length - 1, old.lineIndex + 2);
+              for (let i = lo; i <= hi; i++) {
+                if (lines[i].match(/^(\s*)-\s\[x\]/) && lines[i].includes(old.text)) {
+                  completedTexts.add(old.text);
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        if (completedTexts.size > 0) {
+          this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
+            if (leaf.view instanceof ChecklistView) leaf.view.triggerExternalCompletion(file.path, completedTexts);
+          });
+        }
+
         if (!this.suppressRefresh) this.refreshView();
       }
     }));

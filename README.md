@@ -1,4 +1,4 @@
-# Simpel Checklist
+# Simple Checklist
 
 An Obsidian plugin that collects all open `- [ ]` todos across your vault into a single side panel.
 
@@ -22,7 +22,7 @@ Open the checklist panel via:
 
 ### Community plugins (recommended)
 
-Search for **Simpel Checklist** in Settings → Community plugins → Browse.
+Search for **Simple Checklist** in Settings → Community plugins → Browse.
 
 ### Manual
 
