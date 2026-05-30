@@ -21,22 +21,6 @@ Open the checklist panel via:
 
 ## Installation
 
-### Community plugins (recommended)
-
 Search for **Simple Checklist** in Settings → Community plugins → Browse.
 
-### Manual
-
-1. Download `main.js`, `manifest.json`, and `styles.css` from the [latest release](../../releases/latest)
-2. Copy them to `<vault>/.obsidian/plugins/obsidian-checklist/`
-3. Enable the plugin in Settings → Community plugins
-
-## Todo format
-
-The plugin picks up any line matching `- [ ] …`, including indented items:
-
-```markdown
-- [ ] Buy groceries
-  - [ ] Nested todo
-- [x] Already done (ignored)
-```
+Or add via [community.obsidian.md/plugins/simple-checklist](https://community.obsidian.md/plugins/simple-checklist)
