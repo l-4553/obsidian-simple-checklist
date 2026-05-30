@@ -23,10 +23,13 @@ jobs:
       - run: npm ci
       - run: npm run build
 
-      - name: Attest main.js
+      - name: Attest build artifacts
         uses: actions/attest-build-provenance@v1
         with:
-          subject-path: main.js
+          subject-path: |
+            main.js
+            styles.css
+            manifest.json
 
       - name: Create release
         uses: softprops/action-gh-release@v2
