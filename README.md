@@ -1,4 +1,5 @@
 # Simple Checklist
+<img width="1080" height="813" alt="showcasing" src="https://github.com/user-attachments/assets/9102635f-ad51-4fee-80bc-d0918cdea42a" />
 
 An Obsidian plugin that collects all open `- [ ]` todos across your vault into a single side panel.
 
