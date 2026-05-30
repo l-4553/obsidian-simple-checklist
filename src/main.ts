@@ -98,7 +98,22 @@ class ChecklistView extends ItemView {
   getViewType(): string { return VIEW_TYPE; }
   getDisplayText(): string { return "Checklist"; }
   getIcon(): string { return "check-square"; }
-  async onOpen(): Promise<void> { this.render(); }
+  async onOpen(): Promise<void> {
+    this.render();
+    // Forward Cmd/Ctrl+Z to the last-modified editor, or our own undo stack if file isn't open
+    this.containerEl.addEventListener("keydown", async (e) => {
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === "z") {
+        const editor = this.plugin.getLastModifiedEditor();
+        if (editor) {
+          e.preventDefault();
+          (editor as any).exec("undo");
+        } else {
+          e.preventDefault();
+          await this.plugin.undoLastSidebarAction();
+        }
+      }
+    });
+  }
   async onClose(): Promise<void> {}
 
   triggerExternalCompletion(filePath: string, completedTexts: Set<string>): void {
@@ -291,6 +306,10 @@ export default class ChecklistPlugin extends Plugin {
   private index: Map<string, Array<{ lineIndex: number; text: string }>> = new Map();
   suppressRefresh = false;
   private writeQueue: Promise<void> = Promise.resolve();
+  // Tracks the last content we processed per file so editor-change and vault-modify don't double-fire
+  private lastProcessedContent = new Map<string, string>();
+  private lastModifiedFile: TFile | null = null;
+  private undoStack: Array<() => Promise<void>> = [];
 
   private enqueue(fn: () => Promise<void>): Promise<void> {
     this.writeQueue = this.writeQueue.then(fn);
@@ -307,39 +326,22 @@ export default class ChecklistPlugin extends Plugin {
       this.refreshView();
     });
 
+    // Detect checkbox toggles immediately as the user types/presses Cmd+L
+    this.registerEvent(this.app.workspace.on("editor-change", (editor, view) => {
+      if (!(view instanceof MarkdownView) || !view.file) return;
+      const file = view.file;
+      const content = editor.getValue();
+      // Skip if we already processed this exact content (avoids double-fire with vault modify)
+      if (this.lastProcessedContent.get(file.path) === content) return;
+      this.handleContentChange(file, content);
+    }));
+
     this.registerEvent(this.app.vault.on("modify", async (file) => {
-      if (file instanceof TFile && file.extension === "md") {
-        const oldTodos = this.index.get(file.path) ?? [];
-        await this.updateIndex(file);
-        const newTexts = new Set((this.index.get(file.path) ?? []).map(t => t.text));
-
-        // Detect todos that disappeared from the index — check if they became [x]
-        const completedTexts = new Set<string>();
-        if (oldTodos.length > 0) {
-          const content = await this.app.vault.cachedRead(file);
-          const lines = content.split("\n");
-          for (const old of oldTodos) {
-            if (!newTexts.has(old.text)) {
-              const lo = Math.max(0, old.lineIndex - 2);
-              const hi = Math.min(lines.length - 1, old.lineIndex + 2);
-              for (let i = lo; i <= hi; i++) {
-                if (lines[i].match(/^(\s*)-\s\[x\]/) && lines[i].includes(old.text)) {
-                  completedTexts.add(old.text);
-                  break;
-                }
-              }
-            }
-          }
-        }
-
-        if (completedTexts.size > 0) {
-          this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
-            if (leaf.view instanceof ChecklistView) leaf.view.triggerExternalCompletion(file.path, completedTexts);
-          });
-        }
-
-        if (!this.suppressRefresh) this.refreshView();
-      }
+      if (!(file instanceof TFile) || file.extension !== "md") return;
+      const content = await this.app.vault.cachedRead(file);
+      // Skip if editor-change already processed this content
+      if (this.lastProcessedContent.get(file.path) === content) return;
+      this.handleContentChange(file, content);
     }));
 
     this.registerEvent(this.app.vault.on("delete", (file) => {
@@ -364,13 +366,49 @@ export default class ChecklistPlugin extends Plugin {
 
   async updateIndex(file: TFile): Promise<void> {
     const content = await this.app.vault.cachedRead(file);
+    this.indexContent(file.path, content);
+  }
+
+  private indexContent(filePath: string, content: string): void {
     const todos: Array<{ lineIndex: number; text: string }> = [];
     content.split("\n").forEach((line, i) => {
       const m = line.match(/^(\s*)-\s\[ \]\s(.+)/);
       if (m) todos.push({ lineIndex: i, text: m[2] });
     });
-    if (todos.length > 0) this.index.set(file.path, todos);
-    else this.index.delete(file.path);
+    if (todos.length > 0) this.index.set(filePath, todos);
+    else this.index.delete(filePath);
+  }
+
+  private handleContentChange(file: TFile, content: string): void {
+    const oldTodos = this.index.get(file.path) ?? [];
+    this.lastProcessedContent.set(file.path, content);
+    this.indexContent(file.path, content);
+    const newTexts = new Set((this.index.get(file.path) ?? []).map(t => t.text));
+
+    const completedTexts = new Set<string>();
+    if (oldTodos.length > 0) {
+      const lines = content.split("\n");
+      for (const old of oldTodos) {
+        if (!newTexts.has(old.text)) {
+          const lo = Math.max(0, old.lineIndex - 2);
+          const hi = Math.min(lines.length - 1, old.lineIndex + 2);
+          for (let i = lo; i <= hi; i++) {
+            if (lines[i].match(/^(\s*)-\s\[x\]/) && lines[i].includes(old.text)) {
+              completedTexts.add(old.text);
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (completedTexts.size > 0) {
+      this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
+        if (leaf.view instanceof ChecklistView) leaf.view.triggerExternalCompletion(file.path, completedTexts);
+      });
+    }
+
+    if (!this.suppressRefresh) this.refreshView();
   }
 
   getAllTodos(): TodoItem[] {
@@ -387,33 +425,105 @@ export default class ChecklistPlugin extends Plugin {
     return todos;
   }
 
+  private getEditorForFile(file: TFile): Editor | null {
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      const view = leaf.view as MarkdownView;
+      if (view.file?.path === file.path) return view.editor;
+    }
+    return null;
+  }
+
+  getLastModifiedEditor(): Editor | null {
+    return this.lastModifiedFile ? this.getEditorForFile(this.lastModifiedFile) : null;
+  }
+
+  async undoLastSidebarAction(): Promise<void> {
+    const fn = this.undoStack.pop();
+    if (fn) await fn();
+  }
+
+  private findTodoLine(lines: string[], todo: TodoItem): number {
+    return lines.findIndex((l, i) =>
+      i >= todo.lineIndex - 2 && i <= todo.lineIndex + 2 &&
+      l.match(/^(\s*)-\s\[ \]/) && l.includes(todo.text)
+    );
+  }
+
   async deleteTodo(todo: TodoItem): Promise<void> {
     return this.enqueue(async () => {
-      const content = await this.app.vault.read(todo.file);
-      const lines = content.split("\n");
-      // Find the line by text in case index shifted since click
-      const idx = lines.findIndex((l, i) =>
-        i >= todo.lineIndex - 2 && i <= todo.lineIndex + 2 &&
-        l.match(/^(\s*)-\s\[ \]/) && l.includes(todo.text)
-      ) ?? todo.lineIndex;
-      if (idx >= 0 && lines[idx]?.match(/^(\s*)-\s\[ \]/)) {
-        lines.splice(idx, 1);
-        await this.app.vault.modify(todo.file, lines.join("\n"));
+      const editor = this.getEditorForFile(todo.file);
+      if (editor) {
+        const lines = editor.getValue().split("\n");
+        const idx = this.findTodoLine(lines, todo);
+        if (idx >= 0 && lines[idx]?.match(/^(\s*)-\s\[ \]/)) {
+          const from = { line: idx, ch: 0 };
+          // Delete the line including its newline; if it's the last line, delete the preceding newline
+          const isLast = idx === lines.length - 1;
+          const to = isLast
+            ? { line: idx - 1, ch: lines[idx - 1]?.length ?? 0 }
+            : { line: idx + 1, ch: 0 };
+          if (isLast && idx === 0) {
+            editor.replaceRange("", from, { line: idx, ch: lines[idx].length });
+          } else if (isLast) {
+            editor.replaceRange("", to, { line: idx, ch: lines[idx].length });
+          } else {
+            editor.replaceRange("", from, to);
+          }
+          this.lastModifiedFile = todo.file;
+        }
+      } else {
+        const content = await this.app.vault.read(todo.file);
+        const lines = content.split("\n");
+        const idx = this.findTodoLine(lines, todo);
+        if (idx >= 0 && lines[idx]?.match(/^(\s*)-\s\[ \]/)) {
+          const deletedLine = lines[idx];
+          lines.splice(idx, 1);
+          await this.app.vault.modify(todo.file, lines.join("\n"));
+          this.lastModifiedFile = todo.file;
+          this.undoStack.push(async () => {
+            const current = await this.app.vault.read(todo.file);
+            const cur = current.split("\n");
+            cur.splice(idx, 0, deletedLine);
+            await this.app.vault.modify(todo.file, cur.join("\n"));
+          });
+        }
       }
     });
   }
 
   async completeTodo(todo: TodoItem): Promise<void> {
     return this.enqueue(async () => {
-      const content = await this.app.vault.read(todo.file);
-      const lines = content.split("\n");
-      const idx = lines.findIndex((l, i) =>
-        i >= todo.lineIndex - 2 && i <= todo.lineIndex + 2 &&
-        l.match(/^(\s*)-\s\[ \]/) && l.includes(todo.text)
-      ) ?? todo.lineIndex;
-      if (idx >= 0 && lines[idx]?.match(/^(\s*)-\s\[ \]/)) {
-        lines[idx] = lines[idx].replace("- [ ]", "- [x]");
-        await this.app.vault.modify(todo.file, lines.join("\n"));
+      const editor = this.getEditorForFile(todo.file);
+      if (editor) {
+        const lines = editor.getValue().split("\n");
+        const idx = this.findTodoLine(lines, todo);
+        if (idx >= 0 && lines[idx]?.match(/^(\s*)-\s\[ \]/)) {
+          const line = lines[idx];
+          const col = line.indexOf("- [ ]");
+          editor.replaceRange("- [x]", { line: idx, ch: col }, { line: idx, ch: col + 5 });
+          this.lastModifiedFile = todo.file;
+        }
+      } else {
+        const content = await this.app.vault.read(todo.file);
+        const lines = content.split("\n");
+        const idx = this.findTodoLine(lines, todo);
+        if (idx >= 0 && lines[idx]?.match(/^(\s*)-\s\[ \]/)) {
+          const originalLine = lines[idx];
+          lines[idx] = originalLine.replace("- [ ]", "- [x]");
+          await this.app.vault.modify(todo.file, lines.join("\n"));
+          this.lastModifiedFile = todo.file;
+          this.undoStack.push(async () => {
+            const current = await this.app.vault.read(todo.file);
+            const cur = current.split("\n");
+            const i = cur.findIndex((l, li) =>
+              li >= idx - 2 && li <= idx + 2 && l.includes("- [x]") && l.includes(todo.text)
+            );
+            if (i >= 0) {
+              cur[i] = cur[i].replace("- [x]", "- [ ]");
+              await this.app.vault.modify(todo.file, cur.join("\n"));
+            }
+          });
+        }
       }
     });
   }
