@@ -32,6 +32,19 @@ const DEFAULT_SETTINGS: ChecklistSettings = {
   dateNotesOnly: false,
 };
 
+// Minimal shape of the Daily Notes core plugin we touch. The internalPlugins
+// container isn't in Obsidian's public type definitions, so we declare just
+// enough to safely read the format setting.
+interface DailyNotesPluginInstance {
+  options?: { format?: string };
+}
+interface InternalPluginContainer {
+  getPluginById(id: "daily-notes"): { instance?: DailyNotesPluginInstance } | null;
+}
+interface AppWithInternalPlugins {
+  internalPlugins?: InternalPluginContainer;
+}
+
 // Matches [[target]], [[target|alias]], [[target#heading]], [[target#heading|alias]]
 // and markdown links [label](target)
 const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[([^\]]+)\]\(([^)]+)\)/g;
@@ -70,13 +83,16 @@ function spawnConfetti(originEl: HTMLElement): void {
   // Skip when the origin is hidden (collapsed sidebar, inactive tab) or the
   // Obsidian window itself isn't focused — the user can't see the animation.
   if (originEl.offsetParent === null) return;
-  if (typeof document.hasFocus === "function" && !document.hasFocus()) return;
+  // Render into the document that actually owns the origin element, so
+  // confetti shows up in popout windows too.
+  const doc = originEl.ownerDocument;
+  if (typeof doc.hasFocus === "function" && !doc.hasFocus()) return;
   const rect = originEl.getBoundingClientRect();
   if (rect.width === 0 && rect.height === 0) return;
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
   for (let i = 0; i < 14; i++) {
-    const el = document.createElement("div");
+    const el = doc.createElement("div");
     el.className = "checklist-confetti-particle";
     const size = 5 + Math.random() * 5;
     const angle = (i / 14) * 2 * Math.PI + (Math.random() - 0.5) * 0.4;
@@ -89,7 +105,7 @@ function spawnConfetti(originEl: HTMLElement): void {
       `background:${CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)]}`,
       `animation-duration:${380 + Math.random() * 220}ms`,
     ].join(";");
-    document.body.appendChild(el);
+    doc.body.appendChild(el);
     el.addEventListener("animationend", () => el.remove(), { once: true });
   }
 }
@@ -129,16 +145,15 @@ class ChecklistView extends ItemView {
   async onOpen(): Promise<void> {
     this.render();
     // Forward Cmd/Ctrl+Z to the last-modified editor, or our own undo stack if file isn't open
-    this.containerEl.addEventListener("keydown", async (e) => {
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key === "z") {
-        const editor = this.plugin.getLastModifiedEditor();
-        if (editor) {
-          e.preventDefault();
-          (editor as any).exec("undo");
-        } else {
-          e.preventDefault();
-          await this.plugin.undoLastSidebarAction();
-        }
+    this.containerEl.addEventListener("keydown", (e) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.key !== "z") return;
+      const editor = this.plugin.getLastModifiedEditor();
+      if (editor) {
+        e.preventDefault();
+        editor.undo();
+      } else {
+        e.preventDefault();
+        void this.plugin.undoLastSidebarAction();
       }
     });
   }
@@ -148,7 +163,7 @@ class ChecklistView extends ItemView {
     for (const [key, row] of this.rowEls) {
       const parts = key.split("\0");
       if (parts[0] === filePath && completedTexts.has(parts[1])) {
-        const checkbox = row.querySelector(".checklist-checkbox") as HTMLElement | null;
+        const checkbox = row.querySelector<HTMLElement>(".checklist-checkbox");
         if (checkbox) spawnConfetti(checkbox);
         const groupEl = row.parentElement;
         row.remove();
@@ -294,50 +309,52 @@ class ChecklistView extends ItemView {
 
     const checkbox = row.createDiv({ cls: "checklist-checkbox" });
     let completing = false;
-    checkbox.addEventListener("click", async (e) => {
+    checkbox.addEventListener("click", (e) => {
       e.stopPropagation();
       if (completing) return;
       completing = true;
       spawnConfetti(checkbox);
       this.plugin.suppressRefresh = true;
-      await this.plugin.completeTodo(todo);
-      row.remove();
-      this.rowEls.delete(key);
-      if (!groupEl.querySelector(".checklist-item")) {
-        groupEl.remove();
-        this.groupEls.delete(todo.file.path);
-      }
-      this.plugin.suppressRefresh = false;
-      this.plugin.refreshView();
+      void this.plugin.completeTodo(todo).then(() => {
+        row.remove();
+        this.rowEls.delete(key);
+        if (!groupEl.querySelector(".checklist-item")) {
+          groupEl.remove();
+          this.groupEls.delete(todo.file.path);
+        }
+        this.plugin.suppressRefresh = false;
+        this.plugin.refreshView();
+      });
     });
 
     const text = row.createDiv({ cls: "checklist-text" });
     renderTodoText(text, todo.text, todo.file.path, (target, subpath, source) => {
-      this.plugin.app.workspace.openLinkText(target + subpath, source, false);
+      void this.plugin.app.workspace.openLinkText(target + subpath, source, false);
     });
     text.addEventListener("click", (e) => {
       if (!(e.target as HTMLElement).classList.contains("checklist-inline-link")) {
-        this.plugin.navigateToTodo(todo);
+        void this.plugin.navigateToTodo(todo);
       }
     });
 
     const trash = row.createDiv({ cls: "checklist-trash" });
     setIcon(trash, "trash");
     let deleting = false;
-    trash.addEventListener("click", async (e) => {
+    trash.addEventListener("click", (e) => {
       e.stopPropagation();
       if (deleting) return;
       deleting = true;
       this.plugin.suppressRefresh = true;
-      await this.plugin.deleteTodo(todo);
-      row.remove();
-      this.rowEls.delete(key);
-      if (!groupEl.querySelector(".checklist-item")) {
-        groupEl.remove();
-        this.groupEls.delete(todo.file.path);
-      }
-      this.plugin.suppressRefresh = false;
-      this.plugin.refreshView();
+      void this.plugin.deleteTodo(todo).then(() => {
+        row.remove();
+        this.rowEls.delete(key);
+        if (!groupEl.querySelector(".checklist-item")) {
+          groupEl.remove();
+          this.groupEls.delete(todo.file.path);
+        }
+        this.plugin.suppressRefresh = false;
+        this.plugin.refreshView();
+      });
     });
 
     return row;
@@ -360,7 +377,8 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const stored = (await this.loadData()) as Partial<ChecklistSettings> | null;
+    this.settings = { ...DEFAULT_SETTINGS, ...(stored ?? {}) };
   }
 
   async saveSettings(): Promise<void> {
@@ -370,8 +388,8 @@ export default class ChecklistPlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.registerView(VIEW_TYPE, (leaf) => new ChecklistView(leaf, this));
-    this.addRibbonIcon("check-square", "Open Checklist", () => this.activateView());
-    this.addCommand({ id: "open-checklist", name: "Open Checklist panel", callback: () => this.activateView() });
+    this.addRibbonIcon("check-square", "Open Checklist", () => { void this.activateView(); });
+    this.addCommand({ id: "open-checklist", name: "Open Checklist panel", callback: () => { void this.activateView(); } });
     this.addSettingTab(new ChecklistSettingTab(this.app, this));
 
     this.app.workspace.onLayoutReady(async () => {
@@ -409,8 +427,6 @@ export default class ChecklistPlugin extends Plugin {
       }
     }));
   }
-
-  onunload(): void { this.app.workspace.detachLeavesOfType(VIEW_TYPE); }
 
   async buildIndex(): Promise<void> {
     this.index.clear();
@@ -490,8 +506,8 @@ export default class ChecklistPlugin extends Plugin {
   // Reads the Daily Notes core plugin's date format, falling back to the
   // Obsidian default. Returning a string keeps the call site simple.
   private getDateNotesFormat(): string {
-    const internalPlugins = (this.app as any).internalPlugins;
-    const fmt = internalPlugins?.getPluginById?.("daily-notes")?.instance?.options?.format;
+    const container = (this.app as unknown as AppWithInternalPlugins).internalPlugins;
+    const fmt = container?.getPluginById("daily-notes")?.instance?.options?.format;
     return typeof fmt === "string" && fmt.length > 0 ? fmt : "YYYY-MM-DD";
   }
 
@@ -655,7 +671,7 @@ export default class ChecklistPlugin extends Plugin {
       leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf(false);
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
-    workspace.revealLeaf(leaf);
+    await workspace.revealLeaf(leaf);
   }
 }
 
