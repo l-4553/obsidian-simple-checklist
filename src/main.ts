@@ -2,6 +2,7 @@ import {
   Editor,
   ItemView,
   MarkdownView,
+  moment,
   Plugin,
   setIcon,
   TFile,
@@ -15,6 +16,18 @@ interface TodoItem {
   lineIndex: number;
   text: string;
 }
+
+type SortMode = "recent" | "alpha";
+
+interface ChecklistSettings {
+  sortMode: SortMode;
+  dateNotesOnly: boolean;
+}
+
+const DEFAULT_SETTINGS: ChecklistSettings = {
+  sortMode: "recent",
+  dateNotesOnly: false,
+};
 
 // Matches [[target]], [[target|alias]], [[target#heading]], [[target#heading|alias]]
 // and markdown links [label](target)
@@ -51,7 +64,12 @@ function renderTodoText(
 const CONFETTI_COLORS = ["#f94144", "#f3722c", "#f8961e", "#f9c74f", "#90be6d", "#43aa8b", "#577590", "#a8dadc"];
 
 function spawnConfetti(originEl: HTMLElement): void {
+  // Skip when the origin is hidden (collapsed sidebar, inactive tab) or the
+  // Obsidian window itself isn't focused — the user can't see the animation.
+  if (originEl.offsetParent === null) return;
+  if (typeof document.hasFocus === "function" && !document.hasFocus()) return;
   const rect = originEl.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) return;
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
   for (let i = 0; i < 14; i++) {
@@ -83,6 +101,10 @@ class ChecklistView extends ItemView {
   plugin: ChecklistPlugin;
 
   // Persistent DOM state — survives across renders
+  private headerEl: HTMLElement | null = null;
+  private sortRecentBtn: HTMLElement | null = null;
+  private sortAlphaBtn: HTMLElement | null = null;
+  private dateOnlyBtn: HTMLElement | null = null;
   private wrapper: HTMLElement | null = null;
   private emptyEl: HTMLElement | null = null;
   private rowEls = new Map<string, HTMLElement>();   // itemKey -> row
@@ -135,6 +157,8 @@ class ChecklistView extends ItemView {
 
   render(): void {
     const container = this.containerEl.children[1] as HTMLElement;
+    this.ensureHeader(container);
+    this.updateHeaderState();
     const todos = this.plugin.getAllTodos();
 
     // ── Empty state ──────────────────────────────────────────────────────────
@@ -147,7 +171,18 @@ class ChecklistView extends ItemView {
         this.displayOrder = [];
       }
       if (!this.emptyEl) {
-        this.emptyEl = container.createDiv({ cls: "checklist-empty", text: "No open todos." });
+        this.emptyEl = container.createDiv({
+          cls: "checklist-empty",
+          text: this.plugin.settings.dateNotesOnly
+            ? "No open todos in date notes."
+            : "No open todos.",
+        });
+      } else {
+        this.emptyEl.setText(
+          this.plugin.settings.dateNotesOnly
+            ? "No open todos in date notes."
+            : "No open todos."
+        );
       }
       return;
     }
@@ -163,19 +198,28 @@ class ChecklistView extends ItemView {
       grouped.get(todo.file.path)!.push(todo);
     }
 
-    // ── Maintain stable display order ────────────────────────────────────────
-    // Remove paths no longer present
-    this.displayOrder = this.displayOrder.filter(p => grouped.has(p));
-    // Collect new paths (not yet in displayOrder), sorted by mtime so newest is first
-    const newPaths = [...grouped.keys()]
-      .filter(p => !this.displayOrder.includes(p))
-      .sort((a, b) => {
+    // ── Determine display order based on sort mode ───────────────────────────
+    if (this.plugin.settings.sortMode === "alpha") {
+      // Strictly alphabetical by file basename, recomputed each render.
+      this.displayOrder = [...grouped.keys()].sort((a, b) => {
         const fa = grouped.get(a)![0].file;
         const fb = grouped.get(b)![0].file;
-        return fb.stat.mtime - fa.stat.mtime;
+        return fa.basename.localeCompare(fb.basename);
       });
-    // Prepend new paths so they appear at the top
-    this.displayOrder = [...newPaths, ...this.displayOrder];
+    } else {
+      // Recent: stable order — keep existing positions, prepend new files
+      // sorted by mtime (newest first). Prevents the list from jumping when
+      // a file's mtime updates from completing a todo.
+      this.displayOrder = this.displayOrder.filter(p => grouped.has(p));
+      const newPaths = [...grouped.keys()]
+        .filter(p => !this.displayOrder.includes(p))
+        .sort((a, b) => {
+          const fa = grouped.get(a)![0].file;
+          const fb = grouped.get(b)![0].file;
+          return fb.stat.mtime - fa.stat.mtime;
+        });
+      this.displayOrder = [...newPaths, ...this.displayOrder];
+    }
     const orderedPaths = this.displayOrder;
 
     // ── Remove stale groups ───────────────────────────────────────────────────
@@ -247,6 +291,64 @@ class ChecklistView extends ItemView {
     }
   }
 
+  private ensureHeader(container: HTMLElement): void {
+    if (this.headerEl) return;
+    // Insert header at the top so it sits above wrapper / empty state, which
+    // are appended later in render().
+    this.headerEl = container.createDiv({ cls: "checklist-header" });
+    if (container.firstChild !== this.headerEl) {
+      container.insertBefore(this.headerEl, container.firstChild);
+    }
+
+    const sortGroup = this.headerEl.createDiv({ cls: "checklist-sort-group" });
+    this.sortRecentBtn = sortGroup.createEl("button", {
+      cls: "checklist-sort-btn",
+      text: "Recent",
+      attr: { type: "button", "aria-label": "Sort by most recently modified" },
+    });
+    this.sortAlphaBtn = sortGroup.createEl("button", {
+      cls: "checklist-sort-btn",
+      text: "A–Z",
+      attr: { type: "button", "aria-label": "Sort alphabetically" },
+    });
+
+    this.sortRecentBtn.addEventListener("click", () => this.setSortMode("recent"));
+    this.sortAlphaBtn.addEventListener("click", () => this.setSortMode("alpha"));
+
+    this.dateOnlyBtn = this.headerEl.createEl("button", {
+      cls: "checklist-filter-btn",
+      text: "Date notes only",
+      attr: { type: "button", "aria-pressed": "false" },
+    });
+    this.dateOnlyBtn.addEventListener("click", () => this.toggleDateOnly());
+  }
+
+  private updateHeaderState(): void {
+    if (!this.sortRecentBtn || !this.sortAlphaBtn || !this.dateOnlyBtn) return;
+    const mode = this.plugin.settings.sortMode;
+    this.sortRecentBtn.toggleClass("is-active", mode === "recent");
+    this.sortAlphaBtn.toggleClass("is-active", mode === "alpha");
+    const dateOn = this.plugin.settings.dateNotesOnly;
+    this.dateOnlyBtn.toggleClass("is-active", dateOn);
+    this.dateOnlyBtn.setAttribute("aria-pressed", dateOn ? "true" : "false");
+  }
+
+  private async setSortMode(mode: SortMode): Promise<void> {
+    if (this.plugin.settings.sortMode === mode) return;
+    this.plugin.settings.sortMode = mode;
+    await this.plugin.saveSettings();
+    // Reset stable order so the new sort takes effect immediately.
+    this.displayOrder = [];
+    this.plugin.refreshView();
+  }
+
+  private async toggleDateOnly(): Promise<void> {
+    this.plugin.settings.dateNotesOnly = !this.plugin.settings.dateNotesOnly;
+    await this.plugin.saveSettings();
+    this.displayOrder = [];
+    this.plugin.refreshView();
+  }
+
   private buildRow(todo: TodoItem, groupEl: HTMLElement, key: string): HTMLElement {
     const row = createDiv({ cls: "checklist-item" });
 
@@ -305,6 +407,7 @@ class ChecklistView extends ItemView {
 export default class ChecklistPlugin extends Plugin {
   private index: Map<string, Array<{ lineIndex: number; text: string }>> = new Map();
   suppressRefresh = false;
+  settings: ChecklistSettings = { ...DEFAULT_SETTINGS };
   private writeQueue: Promise<void> = Promise.resolve();
   // Tracks the last content we processed per file so editor-change and vault-modify don't double-fire
   private lastProcessedContent = new Map<string, string>();
@@ -316,7 +419,16 @@ export default class ChecklistPlugin extends Plugin {
     return this.writeQueue;
   }
 
+  async loadSettings(): Promise<void> {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings(): Promise<void> {
+    await this.saveData(this.settings);
+  }
+
   async onload(): Promise<void> {
+    await this.loadSettings();
     this.registerView(VIEW_TYPE, (leaf) => new ChecklistView(leaf, this));
     this.addRibbonIcon("check-square", "Open Checklist", () => this.activateView());
     this.addCommand({ id: "open-checklist", name: "Open Checklist panel", callback: () => this.activateView() });
@@ -413,16 +525,37 @@ export default class ChecklistPlugin extends Plugin {
 
   getAllTodos(): TodoItem[] {
     const todos: TodoItem[] = [];
+    const dateFilter = this.settings.dateNotesOnly ? this.getDateNotesFormat() : null;
     for (const [path, items] of this.index) {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
+      if (dateFilter !== null && !this.isDateNote(file, dateFilter)) continue;
       for (const item of items) todos.push({ file, lineIndex: item.lineIndex, text: item.text });
     }
-    todos.sort((a, b) => {
-      const d = b.file.stat.mtime - a.file.stat.mtime;
-      return d !== 0 ? d : a.lineIndex - b.lineIndex;
-    });
+    if (this.settings.sortMode === "alpha") {
+      todos.sort((a, b) => {
+        const c = a.file.basename.localeCompare(b.file.basename);
+        return c !== 0 ? c : a.lineIndex - b.lineIndex;
+      });
+    } else {
+      todos.sort((a, b) => {
+        const d = b.file.stat.mtime - a.file.stat.mtime;
+        return d !== 0 ? d : a.lineIndex - b.lineIndex;
+      });
+    }
     return todos;
+  }
+
+  // Reads the Daily Notes core plugin's date format, falling back to the
+  // Obsidian default. Returning a string keeps the call site simple.
+  private getDateNotesFormat(): string {
+    const internalPlugins = (this.app as any).internalPlugins;
+    const fmt = internalPlugins?.getPluginById?.("daily-notes")?.instance?.options?.format;
+    return typeof fmt === "string" && fmt.length > 0 ? fmt : "YYYY-MM-DD";
+  }
+
+  private isDateNote(file: TFile, format: string): boolean {
+    return moment(file.basename, format, true).isValid();
   }
 
   private getEditorForFile(file: TFile): Editor | null {
@@ -443,10 +576,15 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   private findTodoLine(lines: string[], todo: TodoItem): number {
-    return lines.findIndex((l, i) =>
+    // Prefer matches near the cached line index — this disambiguates when the
+    // file has multiple identical todo lines. Fall back to a full-file search
+    // when the line has shifted further than the ±2 window.
+    const near = lines.findIndex((l, i) =>
       i >= todo.lineIndex - 2 && i <= todo.lineIndex + 2 &&
-      l.match(/^(\s*)-\s\[ \]/) && l.includes(todo.text)
+      /^\s*-\s\[ \]/.test(l) && l.includes(todo.text)
     );
+    if (near >= 0) return near;
+    return lines.findIndex(l => /^\s*-\s\[ \]/.test(l) && l.includes(todo.text));
   }
 
   async deleteTodo(todo: TodoItem): Promise<void> {
@@ -540,8 +678,17 @@ export default class ChecklistPlugin extends Plugin {
 
     const view = leaf.view as MarkdownView;
     const editor: Editor = view.editor;
-    const lineLength = editor.getLine(todo.lineIndex).length;
-    const pos = { line: todo.lineIndex, ch: lineLength };
+
+    // The cached lineIndex may be stale if the file shifted since indexing.
+    // Re-locate the line by matching the todo text on an open unchecked item.
+    const lines = editor.getValue().split("\n");
+    let lineIdx = lines.findIndex(
+      (l) => /^\s*-\s\[ \]\s/.test(l) && l.includes(todo.text)
+    );
+    if (lineIdx < 0) lineIdx = Math.min(todo.lineIndex, lines.length - 1);
+
+    const lineLength = editor.getLine(lineIdx).length;
+    const pos = { line: lineIdx, ch: lineLength };
     editor.setCursor(pos);
     editor.scrollIntoView({ from: pos, to: pos }, true);
   }
