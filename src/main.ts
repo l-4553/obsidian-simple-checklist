@@ -1,9 +1,12 @@
 import {
+  App,
   Editor,
   ItemView,
   MarkdownView,
   moment,
   Plugin,
+  PluginSettingTab,
+  Setting,
   setIcon,
   TFile,
   WorkspaceLeaf,
@@ -101,16 +104,19 @@ class ChecklistView extends ItemView {
   plugin: ChecklistPlugin;
 
   // Persistent DOM state — survives across renders
-  private headerEl: HTMLElement | null = null;
-  private sortRecentBtn: HTMLElement | null = null;
-  private sortAlphaBtn: HTMLElement | null = null;
-  private dateOnlyBtn: HTMLElement | null = null;
   private wrapper: HTMLElement | null = null;
   private emptyEl: HTMLElement | null = null;
   private rowEls = new Map<string, HTMLElement>();   // itemKey -> row
   private groupEls = new Map<string, { group: HTMLElement; title: HTMLElement }>();
   // Stable display order — only updated on first load or when new file paths appear
   private displayOrder: string[] = [];
+
+  // Called by the plugin when settings change — resets the stable order so
+  // the new sort/filter takes effect on the next render.
+  applySettings(): void {
+    this.displayOrder = [];
+    this.render();
+  }
 
   constructor(leaf: WorkspaceLeaf, plugin: ChecklistPlugin) {
     super(leaf);
@@ -157,8 +163,6 @@ class ChecklistView extends ItemView {
 
   render(): void {
     const container = this.containerEl.children[1] as HTMLElement;
-    this.ensureHeader(container);
-    this.updateHeaderState();
     const todos = this.plugin.getAllTodos();
 
     // ── Empty state ──────────────────────────────────────────────────────────
@@ -170,19 +174,13 @@ class ChecklistView extends ItemView {
         this.groupEls.clear();
         this.displayOrder = [];
       }
+      const emptyText = this.plugin.settings.dateNotesOnly
+        ? "No open todos in date notes."
+        : "No open todos.";
       if (!this.emptyEl) {
-        this.emptyEl = container.createDiv({
-          cls: "checklist-empty",
-          text: this.plugin.settings.dateNotesOnly
-            ? "No open todos in date notes."
-            : "No open todos.",
-        });
+        this.emptyEl = container.createDiv({ cls: "checklist-empty", text: emptyText });
       } else {
-        this.emptyEl.setText(
-          this.plugin.settings.dateNotesOnly
-            ? "No open todos in date notes."
-            : "No open todos."
-        );
+        this.emptyEl.setText(emptyText);
       }
       return;
     }
@@ -291,64 +289,6 @@ class ChecklistView extends ItemView {
     }
   }
 
-  private ensureHeader(container: HTMLElement): void {
-    if (this.headerEl) return;
-    // Insert header at the top so it sits above wrapper / empty state, which
-    // are appended later in render().
-    this.headerEl = container.createDiv({ cls: "checklist-header" });
-    if (container.firstChild !== this.headerEl) {
-      container.insertBefore(this.headerEl, container.firstChild);
-    }
-
-    const sortGroup = this.headerEl.createDiv({ cls: "checklist-sort-group" });
-    this.sortRecentBtn = sortGroup.createEl("button", {
-      cls: "checklist-sort-btn",
-      text: "Recent",
-      attr: { type: "button", "aria-label": "Sort by most recently modified" },
-    });
-    this.sortAlphaBtn = sortGroup.createEl("button", {
-      cls: "checklist-sort-btn",
-      text: "A–Z",
-      attr: { type: "button", "aria-label": "Sort alphabetically" },
-    });
-
-    this.sortRecentBtn.addEventListener("click", () => this.setSortMode("recent"));
-    this.sortAlphaBtn.addEventListener("click", () => this.setSortMode("alpha"));
-
-    this.dateOnlyBtn = this.headerEl.createEl("button", {
-      cls: "checklist-filter-btn",
-      text: "Date notes only",
-      attr: { type: "button", "aria-pressed": "false" },
-    });
-    this.dateOnlyBtn.addEventListener("click", () => this.toggleDateOnly());
-  }
-
-  private updateHeaderState(): void {
-    if (!this.sortRecentBtn || !this.sortAlphaBtn || !this.dateOnlyBtn) return;
-    const mode = this.plugin.settings.sortMode;
-    this.sortRecentBtn.toggleClass("is-active", mode === "recent");
-    this.sortAlphaBtn.toggleClass("is-active", mode === "alpha");
-    const dateOn = this.plugin.settings.dateNotesOnly;
-    this.dateOnlyBtn.toggleClass("is-active", dateOn);
-    this.dateOnlyBtn.setAttribute("aria-pressed", dateOn ? "true" : "false");
-  }
-
-  private async setSortMode(mode: SortMode): Promise<void> {
-    if (this.plugin.settings.sortMode === mode) return;
-    this.plugin.settings.sortMode = mode;
-    await this.plugin.saveSettings();
-    // Reset stable order so the new sort takes effect immediately.
-    this.displayOrder = [];
-    this.plugin.refreshView();
-  }
-
-  private async toggleDateOnly(): Promise<void> {
-    this.plugin.settings.dateNotesOnly = !this.plugin.settings.dateNotesOnly;
-    await this.plugin.saveSettings();
-    this.displayOrder = [];
-    this.plugin.refreshView();
-  }
-
   private buildRow(todo: TodoItem, groupEl: HTMLElement, key: string): HTMLElement {
     const row = createDiv({ cls: "checklist-item" });
 
@@ -432,6 +372,7 @@ export default class ChecklistPlugin extends Plugin {
     this.registerView(VIEW_TYPE, (leaf) => new ChecklistView(leaf, this));
     this.addRibbonIcon("check-square", "Open Checklist", () => this.activateView());
     this.addCommand({ id: "open-checklist", name: "Open Checklist panel", callback: () => this.activateView() });
+    this.addSettingTab(new ChecklistSettingTab(this.app, this));
 
     this.app.workspace.onLayoutReady(async () => {
       await this.buildIndex();
@@ -699,6 +640,14 @@ export default class ChecklistPlugin extends Plugin {
     });
   }
 
+  // Called by the settings tab after sort/filter changes so views drop their
+  // stable display order and rebuild with the new settings applied.
+  applySettingsToViews(): void {
+    this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
+      if (leaf.view instanceof ChecklistView) leaf.view.applySettings();
+    });
+  }
+
   async activateView(): Promise<void> {
     const { workspace } = this.app;
     let leaf = workspace.getLeavesOfType(VIEW_TYPE)[0];
@@ -707,5 +656,45 @@ export default class ChecklistPlugin extends Plugin {
       await leaf.setViewState({ type: VIEW_TYPE, active: true });
     }
     workspace.revealLeaf(leaf);
+  }
+}
+
+class ChecklistSettingTab extends PluginSettingTab {
+  plugin: ChecklistPlugin;
+
+  constructor(app: App, plugin: ChecklistPlugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display(): void {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    new Setting(containerEl)
+      .setName("Sort order")
+      .setDesc("How todos are ordered in the panel.")
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption("recent", "Most recently modified")
+          .addOption("alpha", "Alphabetical (A–Z)")
+          .setValue(this.plugin.settings.sortMode)
+          .onChange(async (value) => {
+            this.plugin.settings.sortMode = value as SortMode;
+            await this.plugin.saveSettings();
+            this.plugin.applySettingsToViews();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Date notes only")
+      .setDesc("Show todos only from notes whose filename matches your Daily Notes date format.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.dateNotesOnly).onChange(async (value) => {
+          this.plugin.settings.dateNotesOnly = value;
+          await this.plugin.saveSettings();
+          this.plugin.applySettingsToViews();
+        })
+      );
   }
 }
