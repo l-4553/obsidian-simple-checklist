@@ -1,8 +1,8 @@
 {
   "id": "simple-checklist",
   "name": "Simple Checklist",
-  "version": "1.8.1",
-  "minAppVersion": "1.0.0",
+  "version": "1.8.2",
+  "minAppVersion": "1.7.2",
   "description": "Side panel showing all open todos across your vault.",
   "author": "Lasse",
   "authorUrl": "https://github.com/l-4553",
