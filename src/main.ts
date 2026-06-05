@@ -32,6 +32,12 @@ const DEFAULT_SETTINGS: ChecklistSettings = {
   dateNotesOnly: false,
 };
 
+// Todo lines, with optional callout prefix(es): "  > > - [ ] text" matches.
+// TODO_OPEN_RE captures the trailing text; the *_PREFIX variants are tests only.
+const TODO_OPEN_RE = /^\s*(?:>\s*)*-\s\[ \]\s(.+)/;
+const TODO_OPEN_PREFIX = /^\s*(?:>\s*)*-\s\[ \]/;
+const TODO_DONE_PREFIX = /^\s*(?:>\s*)*-\s\[x\]/;
+
 // Minimal shape of the Daily Notes core plugin we touch. The internalPlugins
 // container isn't in Obsidian's public type definitions, so we declare just
 // enough to safely read the format setting.
@@ -441,8 +447,8 @@ export default class ChecklistPlugin extends Plugin {
   private indexContent(filePath: string, content: string): void {
     const todos: Array<{ lineIndex: number; text: string }> = [];
     content.split("\n").forEach((line, i) => {
-      const m = line.match(/^(\s*)-\s\[ \]\s(.+)/);
-      if (m) todos.push({ lineIndex: i, text: m[2] });
+      const m = line.match(TODO_OPEN_RE);
+      if (m) todos.push({ lineIndex: i, text: m[1] });
     });
     if (todos.length > 0) this.index.set(filePath, todos);
     else this.index.delete(filePath);
@@ -462,7 +468,7 @@ export default class ChecklistPlugin extends Plugin {
           const lo = Math.max(0, old.lineIndex - 2);
           const hi = Math.min(lines.length - 1, old.lineIndex + 2);
           for (let i = lo; i <= hi; i++) {
-            if (lines[i].match(/^(\s*)-\s\[x\]/) && lines[i].includes(old.text)) {
+            if (TODO_DONE_PREFIX.test(lines[i]) && lines[i].includes(old.text)) {
               completedTexts.add(old.text);
               break;
             }
@@ -538,10 +544,10 @@ export default class ChecklistPlugin extends Plugin {
     // when the line has shifted further than the ±2 window.
     const near = lines.findIndex((l, i) =>
       i >= todo.lineIndex - 2 && i <= todo.lineIndex + 2 &&
-      /^\s*-\s\[ \]/.test(l) && l.includes(todo.text)
+      TODO_OPEN_PREFIX.test(l) && l.includes(todo.text)
     );
     if (near >= 0) return near;
-    return lines.findIndex(l => /^\s*-\s\[ \]/.test(l) && l.includes(todo.text));
+    return lines.findIndex(l => TODO_OPEN_PREFIX.test(l) && l.includes(todo.text));
   }
 
   async deleteTodo(todo: TodoItem): Promise<void> {
@@ -550,7 +556,7 @@ export default class ChecklistPlugin extends Plugin {
       if (editor) {
         const lines = editor.getValue().split("\n");
         const idx = this.findTodoLine(lines, todo);
-        if (idx >= 0 && lines[idx]?.match(/^(\s*)-\s\[ \]/)) {
+        if (idx >= 0 && lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) {
           const from = { line: idx, ch: 0 };
           // Delete the line including its newline; if it's the last line, delete the preceding newline
           const isLast = idx === lines.length - 1;
@@ -570,7 +576,7 @@ export default class ChecklistPlugin extends Plugin {
         const content = await this.app.vault.read(todo.file);
         const lines = content.split("\n");
         const idx = this.findTodoLine(lines, todo);
-        if (idx >= 0 && lines[idx]?.match(/^(\s*)-\s\[ \]/)) {
+        if (idx >= 0 && lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) {
           const deletedLine = lines[idx];
           lines.splice(idx, 1);
           await this.app.vault.modify(todo.file, lines.join("\n"));
@@ -592,7 +598,7 @@ export default class ChecklistPlugin extends Plugin {
       if (editor) {
         const lines = editor.getValue().split("\n");
         const idx = this.findTodoLine(lines, todo);
-        if (idx >= 0 && lines[idx]?.match(/^(\s*)-\s\[ \]/)) {
+        if (idx >= 0 && lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) {
           const line = lines[idx];
           const col = line.indexOf("- [ ]");
           editor.replaceRange("- [x]", { line: idx, ch: col }, { line: idx, ch: col + 5 });
@@ -602,7 +608,7 @@ export default class ChecklistPlugin extends Plugin {
         const content = await this.app.vault.read(todo.file);
         const lines = content.split("\n");
         const idx = this.findTodoLine(lines, todo);
-        if (idx >= 0 && lines[idx]?.match(/^(\s*)-\s\[ \]/)) {
+        if (idx >= 0 && lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) {
           const originalLine = lines[idx];
           lines[idx] = originalLine.replace("- [ ]", "- [x]");
           await this.app.vault.modify(todo.file, lines.join("\n"));
@@ -640,7 +646,7 @@ export default class ChecklistPlugin extends Plugin {
     // Re-locate the line by matching the todo text on an open unchecked item.
     const lines = editor.getValue().split("\n");
     let lineIdx = lines.findIndex(
-      (l) => /^\s*-\s\[ \]\s/.test(l) && l.includes(todo.text)
+      (l) => TODO_OPEN_PREFIX.test(l) && l.includes(todo.text)
     );
     if (lineIdx < 0) lineIdx = Math.min(todo.lineIndex, lines.length - 1);
 
