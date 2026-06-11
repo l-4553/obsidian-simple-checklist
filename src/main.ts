@@ -1,5 +1,6 @@
 import {
   App,
+  createDiv,
   Editor,
   ItemView,
   MarkdownView,
@@ -25,12 +26,23 @@ type SortMode = "recent" | "alpha";
 interface ChecklistSettings {
   sortMode: SortMode;
   dateNotesOnly: boolean;
+  movePastTodosToToday: boolean;
 }
 
 const DEFAULT_SETTINGS: ChecklistSettings = {
   sortMode: "recent",
   dateNotesOnly: false,
+  movePastTodosToToday: false,
 };
+
+interface DragTodoPayload {
+  sourcePath: string;
+  text: string;
+  lineIndex: number;
+  occurrence: number;
+}
+
+const DRAG_MIME = "application/x-checklist-todo";
 
 // Todo lines, with optional callout prefix(es): "  > > - [ ] text" matches.
 // TODO_OPEN_RE captures the trailing text; the *_PREFIX variants are tests only.
@@ -42,7 +54,8 @@ const TODO_DONE_PREFIX = /^\s*(?:>\s*)*-\s\[x\]/;
 // container isn't in Obsidian's public type definitions, so we declare just
 // enough to safely read the format setting.
 interface DailyNotesPluginInstance {
-  options?: { format?: string };
+  options?: { format?: string; folder?: string };
+  createDailyNote?: (date?: moment.Moment) => Promise<TFile>;
 }
 interface InternalPluginContainer {
   getPluginById(id: "daily-notes"): { instance?: DailyNotesPluginInstance } | null;
@@ -286,6 +299,7 @@ class ChecklistView extends ItemView {
         const title = group.createDiv({ cls: "checklist-group-title", text: items[0].file.basename });
         groupData = { group, title };
         this.groupEls.set(filePath, groupData);
+        this.setupGroupDrop(group, items[0].file);
       } else {
         groupData.title.setText(items[0].file.basename);
       }
@@ -302,7 +316,7 @@ class ChecklistView extends ItemView {
 
         let row = this.rowEls.get(key);
         if (!row) {
-          row = this.buildRow(todo, groupData.group, key);
+          row = this.buildRow(todo, groupData.group, key, occ);
           this.rowEls.set(key, row);
         }
         groupData.group.appendChild(row);
@@ -310,7 +324,51 @@ class ChecklistView extends ItemView {
     }
   }
 
-  private buildRow(todo: TodoItem, groupEl: HTMLElement, key: string): HTMLElement {
+  private parseDragPayload(e: DragEvent): DragTodoPayload | null {
+    const raw = e.dataTransfer?.getData(DRAG_MIME);
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as DragTodoPayload;
+    } catch {
+      return null;
+    }
+  }
+
+  private payloadToTodo(payload: DragTodoPayload): TodoItem | null {
+    const file = this.plugin.app.vault.getAbstractFileByPath(payload.sourcePath);
+    if (!(file instanceof TFile)) return null;
+    return { file, lineIndex: payload.lineIndex, text: payload.text };
+  }
+
+  private setupGroupDrop(groupEl: HTMLElement, targetFile: TFile): void {
+    groupEl.addEventListener("dragover", (e) => {
+      if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      groupEl.addClass("checklist-group-drag-over");
+    });
+    groupEl.addEventListener("dragleave", (e) => {
+      if (!groupEl.contains(e.relatedTarget as Node)) {
+        groupEl.removeClass("checklist-group-drag-over");
+      }
+    });
+    groupEl.addEventListener("drop", (e) => {
+      groupEl.removeClass("checklist-group-drag-over");
+      const payload = this.parseDragPayload(e);
+      if (!payload || payload.sourcePath === targetFile.path) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const todo = this.payloadToTodo(payload);
+      if (!todo) return;
+      this.plugin.suppressRefresh = true;
+      void this.plugin.moveTodo(todo, targetFile).then(() => {
+        this.plugin.suppressRefresh = false;
+        this.plugin.refreshView();
+      });
+    });
+  }
+
+  private buildRow(todo: TodoItem, groupEl: HTMLElement, key: string, occurrence: number): HTMLElement {
     const row = createDiv({ cls: "checklist-item" });
 
     const checkbox = row.createDiv({ cls: "checklist-checkbox" });
@@ -363,6 +421,57 @@ class ChecklistView extends ItemView {
       });
     });
 
+    row.setAttr("draggable", "true");
+    row.addEventListener("dragstart", (e) => {
+      e.dataTransfer?.setData(
+        DRAG_MIME,
+        JSON.stringify({
+          sourcePath: todo.file.path,
+          text: todo.text,
+          lineIndex: todo.lineIndex,
+          occurrence,
+        } satisfies DragTodoPayload)
+      );
+      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      row.addClass("checklist-item-dragging");
+    });
+    row.addEventListener("dragend", () => {
+      row.removeClass("checklist-item-dragging");
+      this.wrapper?.querySelectorAll(".checklist-group-drag-over").forEach((el) => {
+        el.removeClass("checklist-group-drag-over");
+      });
+      this.wrapper?.querySelectorAll(".checklist-item-drag-over").forEach((el) => {
+        el.removeClass("checklist-item-drag-over");
+      });
+    });
+    row.addEventListener("dragover", (e) => {
+      if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = "move";
+      row.addClass("checklist-item-drag-over");
+    });
+    row.addEventListener("dragleave", () => {
+      row.removeClass("checklist-item-drag-over");
+    });
+    row.addEventListener("drop", (e) => {
+      row.removeClass("checklist-item-drag-over");
+      const payload = this.parseDragPayload(e);
+      if (!payload) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const sourceTodo = this.payloadToTodo(payload);
+      if (!sourceTodo) return;
+      if (sourceTodo.file.path === todo.file.path && sourceTodo.text === todo.text && payload.occurrence === occurrence) {
+        return;
+      }
+      this.plugin.suppressRefresh = true;
+      void this.plugin.moveTodo(sourceTodo, todo.file, todo.lineIndex).then(() => {
+        this.plugin.suppressRefresh = false;
+        this.plugin.refreshView();
+      });
+    });
+
     return row;
   }
 }
@@ -400,6 +509,7 @@ export default class ChecklistPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(async () => {
       await this.buildIndex();
+      await this.migratePastTodosToToday();
       this.refreshView();
     });
 
@@ -509,12 +619,35 @@ export default class ChecklistPlugin extends Plugin {
     return todos;
   }
 
+  private getDailyNotesPlugin(): DailyNotesPluginInstance | null {
+    const container = (this.app as unknown as AppWithInternalPlugins).internalPlugins;
+    return container?.getPluginById("daily-notes")?.instance ?? null;
+  }
+
   // Reads the Daily Notes core plugin's date format, falling back to the
   // Obsidian default. Returning a string keeps the call site simple.
   private getDateNotesFormat(): string {
-    const container = (this.app as unknown as AppWithInternalPlugins).internalPlugins;
-    const fmt = container?.getPluginById("daily-notes")?.instance?.options?.format;
+    const fmt = this.getDailyNotesPlugin()?.options?.format;
     return typeof fmt === "string" && fmt.length > 0 ? fmt : "YYYY-MM-DD";
+  }
+
+  private async getOrCreateTodayNote(): Promise<TFile | null> {
+    const daily = this.getDailyNotesPlugin();
+    if (!daily) return null;
+    if (daily.createDailyNote) {
+      return daily.createDailyNote(moment());
+    }
+    const format = this.getDateNotesFormat();
+    const folder = daily.options?.folder ?? "";
+    const name = `${moment().format(format)}.md`;
+    const path = folder ? `${folder}/${name}` : name;
+    const existing = this.app.vault.getAbstractFileByPath(path);
+    if (existing instanceof TFile) return existing;
+    try {
+      return await this.app.vault.create(path, "");
+    } catch {
+      return null;
+    }
   }
 
   private isDateNote(file: TFile, format: string): boolean {
@@ -629,6 +762,124 @@ export default class ChecklistPlugin extends Plugin {
     });
   }
 
+  async moveTodo(todo: TodoItem, targetFile: TFile, insertBeforeLine?: number): Promise<void> {
+    return this.enqueue(async () => {
+      if (todo.file.path === targetFile.path && insertBeforeLine === undefined) return;
+
+      if (todo.file.path === targetFile.path) {
+        const content = await this.app.vault.read(todo.file);
+        const lines = content.split("\n");
+        const srcIdx = this.findTodoLine(lines, todo);
+        if (srcIdx < 0) return;
+        const todoLine = lines[srcIdx];
+        lines.splice(srcIdx, 1);
+        let insertIdx = insertBeforeLine ?? lines.length;
+        if (srcIdx < insertIdx) insertIdx--;
+        if (insertIdx === srcIdx) return;
+        lines.splice(insertIdx, 0, todoLine);
+        await this.app.vault.modify(todo.file, lines.join("\n"));
+        this.lastModifiedFile = todo.file;
+      } else {
+        const srcContent = await this.app.vault.read(todo.file);
+        const srcLines = srcContent.split("\n");
+        const srcIdx = this.findTodoLine(srcLines, todo);
+        if (srcIdx < 0) return;
+        const todoLine = srcLines[srcIdx];
+        srcLines.splice(srcIdx, 1);
+
+        const tgtContent = await this.app.vault.read(targetFile);
+        const tgtLines = tgtContent.split("\n");
+        const insertIdx = insertBeforeLine ?? tgtLines.length;
+        tgtLines.splice(insertIdx, 0, todoLine);
+
+        const srcPath = todo.file.path;
+        await this.app.vault.modify(todo.file, srcLines.join("\n"));
+        await this.app.vault.modify(targetFile, tgtLines.join("\n"));
+        this.lastModifiedFile = targetFile;
+        this.undoStack.push(async () => {
+          const curTgt = (await this.app.vault.read(targetFile)).split("\n");
+          const tgtIdx = curTgt.findIndex((l) => TODO_OPEN_PREFIX.test(l) && l.includes(todo.text));
+          if (tgtIdx < 0) return;
+          const restored = curTgt[tgtIdx];
+          curTgt.splice(tgtIdx, 1);
+          await this.app.vault.modify(targetFile, curTgt.join("\n"));
+          const curSrc = (await this.app.vault.read(todo.file)).split("\n");
+          curSrc.splice(srcIdx, 0, restored);
+          await this.app.vault.modify(todo.file, curSrc.join("\n"));
+        });
+        await this.updateIndex(this.app.vault.getAbstractFileByPath(srcPath) as TFile);
+      }
+      await this.updateIndex(targetFile);
+    });
+  }
+
+  async migratePastTodosToToday(): Promise<void> {
+    if (!this.settings.movePastTodosToToday) return;
+
+    const format = this.getDateNotesFormat();
+    const today = moment().startOf("day");
+    const todayNote = await this.getOrCreateTodayNote();
+    if (!todayNote) return;
+
+    const removals = new Map<string, number[]>();
+
+    for (const [path, items] of this.index) {
+      if (path === todayNote.path) continue;
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof TFile)) continue;
+      const noteDate = moment(file.basename, format, true);
+      if (!noteDate.isValid() || !noteDate.isBefore(today)) continue;
+
+      const content = await this.app.vault.cachedRead(file);
+      const lines = content.split("\n");
+      for (const item of items) {
+        const idx = this.findTodoLine(lines, { file, lineIndex: item.lineIndex, text: item.text });
+        if (idx >= 0) {
+          if (!removals.has(path)) removals.set(path, []);
+          removals.get(path)!.push(idx);
+        }
+      }
+    }
+
+    const linesToMove: string[] = [];
+    for (const [path, indices] of removals) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (!(file instanceof TFile)) continue;
+      const lines = (await this.app.vault.cachedRead(file)).split("\n");
+      for (const idx of [...indices].sort((a, b) => a - b)) {
+        if (lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) linesToMove.push(lines[idx]);
+      }
+    }
+    if (linesToMove.length === 0) return;
+
+    return this.enqueue(async () => {
+      this.suppressRefresh = true;
+      try {
+        for (const [path, indices] of removals) {
+          const file = this.app.vault.getAbstractFileByPath(path);
+          if (!(file instanceof TFile)) continue;
+          const content = await this.app.vault.read(file);
+          const lines = content.split("\n");
+          for (const idx of [...new Set(indices)].sort((a, b) => b - a)) {
+            if (lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) lines.splice(idx, 1);
+          }
+          await this.app.vault.modify(file, lines.join("\n"));
+          await this.updateIndex(file);
+        }
+
+        const todayContent = await this.app.vault.read(todayNote);
+        const todayLines = todayContent.length > 0 ? todayContent.split("\n") : [];
+        todayLines.push(...linesToMove);
+        await this.app.vault.modify(todayNote, todayLines.join("\n"));
+        await this.updateIndex(todayNote);
+        this.lastModifiedFile = todayNote;
+      } finally {
+        this.suppressRefresh = false;
+        this.refreshView();
+      }
+    });
+  }
+
   async navigateToTodo(todo: TodoItem): Promise<void> {
     let leaf =
       this.app.workspace.getLeavesOfType("markdown").find(
@@ -716,6 +967,21 @@ class ChecklistSettingTab extends PluginSettingTab {
           this.plugin.settings.dateNotesOnly = value;
           await this.plugin.saveSettings();
           this.plugin.applySettingsToViews();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Roll over open todos")
+      .setDesc(
+        "Move open todos from past daily notes into today's daily note on startup. " +
+          "Past notes are detected using your Daily Notes date format."
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.movePastTodosToToday).onChange(async (value) => {
+          this.plugin.settings.movePastTodosToToday = value;
+          await this.plugin.saveSettings();
+          if (value) await this.plugin.migratePastTodosToToday();
+          this.plugin.refreshView();
         })
       );
   }
