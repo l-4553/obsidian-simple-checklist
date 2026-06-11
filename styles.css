@@ -38,6 +38,23 @@
   background-color: var(--background-modifier-hover);
 }
 
+.checklist-item-dragging {
+  opacity: 0.45;
+}
+
+.checklist-item-drag-over {
+  background-color: var(--background-modifier-hover);
+  outline: 1px dashed var(--interactive-accent);
+  outline-offset: -1px;
+}
+
+.checklist-group-drag-over {
+  background-color: var(--background-modifier-hover);
+  border-radius: 4px;
+  outline: 1px dashed var(--interactive-accent);
+  outline-offset: -1px;
+}
+
 .checklist-checkbox {
   flex-shrink: 0;
   width: 15px;
