@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
-# Cuts a new release: bumps version files, builds, commits all pending changes,
-# pushes the branch, then tags and pushes the tag — which triggers the
-# .github/workflows/release.yml workflow to publish the GitHub release.
+# Cuts a new release: bumps package.json, package-lock.json, and manifest.json,
+# builds, commits all pending changes, pushes the branch, then tags and pushes
+# the tag — which triggers .github/workflows/release.yml to publish the release.
 #
 # Usage:
 #   scripts/release.sh <version> <commit description>
@@ -51,15 +51,26 @@ if ! git diff --quiet || ! git diff --cached --quiet; then
   [[ "$reply" =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
 fi
 
-echo "==> Bumping package.json + package-lock.json to $VERSION"
+echo "==> Bumping package.json, package-lock.json, and manifest.json to $VERSION"
 npm version "$VERSION" --no-git-tag-version >/dev/null
 
-echo "==> Bumping manifest.json to $VERSION"
 node -e "
   const fs = require('fs');
-  const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
-  m.version = process.argv[1];
-  fs.writeFileSync('manifest.json', JSON.stringify(m, null, 2) + '\n');
+  const version = process.argv[1];
+  const manifestPath = 'manifest.json';
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  manifest.version = version;
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
+
+  const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+  if (pkg.version !== version) {
+    console.error('error: package.json version is ' + pkg.version + ', expected ' + version);
+    process.exit(1);
+  }
+  if (manifest.version !== version) {
+    console.error('error: manifest.json version is ' + manifest.version + ', expected ' + version);
+    process.exit(1);
+  }
 " "$VERSION"
 
 echo "==> Building"
@@ -67,6 +78,7 @@ npm run build
 
 echo "==> Committing"
 git add -u
+git add package.json package-lock.json manifest.json
 git commit -m "$VERSION: $DESCRIPTION"
 
 echo "==> Pushing branch"
