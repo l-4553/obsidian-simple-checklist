@@ -1,6 +1,5 @@
 import {
   App,
-  createDiv,
   Editor,
   ItemView,
   MarkdownView,
@@ -43,6 +42,17 @@ interface DragTodoPayload {
 }
 
 const DRAG_MIME = "application/x-checklist-todo";
+
+function isDragTodoPayload(value: unknown): value is DragTodoPayload {
+  if (typeof value !== "object" || value === null) return false;
+  const payload = value as Record<string, unknown>;
+  return (
+    typeof payload.sourcePath === "string" &&
+    typeof payload.text === "string" &&
+    typeof payload.lineIndex === "number" &&
+    typeof payload.occurrence === "number"
+  );
+}
 
 // Todo lines, with optional callout prefix(es): "  > > - [ ] text" matches.
 // TODO_OPEN_RE captures the trailing text; the *_PREFIX variants are tests only.
@@ -328,7 +338,8 @@ class ChecklistView extends ItemView {
     const raw = e.dataTransfer?.getData(DRAG_MIME);
     if (!raw) return null;
     try {
-      return JSON.parse(raw) as DragTodoPayload;
+      const parsed: unknown = JSON.parse(raw);
+      return isDragTodoPayload(parsed) ? parsed : null;
     } catch {
       return null;
     }
@@ -341,19 +352,19 @@ class ChecklistView extends ItemView {
   }
 
   private setupGroupDrop(groupEl: HTMLElement, targetFile: TFile): void {
-    groupEl.addEventListener("dragover", (e) => {
+    groupEl.addEventListener("dragover", (e: DragEvent) => {
       if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
-      groupEl.addClass("checklist-group-drag-over");
+      groupEl.classList.add("checklist-group-drag-over");
     });
-    groupEl.addEventListener("dragleave", (e) => {
+    groupEl.addEventListener("dragleave", (e: DragEvent) => {
       if (!groupEl.contains(e.relatedTarget as Node)) {
-        groupEl.removeClass("checklist-group-drag-over");
+        groupEl.classList.remove("checklist-group-drag-over");
       }
     });
-    groupEl.addEventListener("drop", (e) => {
-      groupEl.removeClass("checklist-group-drag-over");
+    groupEl.addEventListener("drop", (e: DragEvent) => {
+      groupEl.classList.remove("checklist-group-drag-over");
       const payload = this.parseDragPayload(e);
       if (!payload || payload.sourcePath === targetFile.path) return;
       e.preventDefault();
@@ -373,7 +384,7 @@ class ChecklistView extends ItemView {
 
     const checkbox = row.createDiv({ cls: "checklist-checkbox" });
     let completing = false;
-    checkbox.addEventListener("click", (e) => {
+    checkbox.addEventListener("click", (e: MouseEvent) => {
       e.stopPropagation();
       if (completing) return;
       completing = true;
@@ -395,8 +406,8 @@ class ChecklistView extends ItemView {
     renderTodoText(text, todo.text, todo.file.path, (target, subpath, source) => {
       void this.plugin.app.workspace.openLinkText(target + subpath, source, false);
     });
-    text.addEventListener("click", (e) => {
-      if (!(e.target as HTMLElement).classList.contains("checklist-inline-link")) {
+    text.addEventListener("click", (e: MouseEvent) => {
+      if (!(e.target instanceof HTMLElement) || !e.target.classList.contains("checklist-inline-link")) {
         void this.plugin.navigateToTodo(todo);
       }
     });
@@ -404,7 +415,7 @@ class ChecklistView extends ItemView {
     const trash = row.createDiv({ cls: "checklist-trash" });
     setIcon(trash, "trash");
     let deleting = false;
-    trash.addEventListener("click", (e) => {
+    trash.addEventListener("click", (e: MouseEvent) => {
       e.stopPropagation();
       if (deleting) return;
       deleting = true;
@@ -421,8 +432,8 @@ class ChecklistView extends ItemView {
       });
     });
 
-    row.setAttr("draggable", "true");
-    row.addEventListener("dragstart", (e) => {
+    row.setAttribute("draggable", "true");
+    row.addEventListener("dragstart", (e: DragEvent) => {
       e.dataTransfer?.setData(
         DRAG_MIME,
         JSON.stringify({
@@ -433,29 +444,29 @@ class ChecklistView extends ItemView {
         } satisfies DragTodoPayload)
       );
       if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-      row.addClass("checklist-item-dragging");
+      row.classList.add("checklist-item-dragging");
     });
     row.addEventListener("dragend", () => {
-      row.removeClass("checklist-item-dragging");
+      row.classList.remove("checklist-item-dragging");
       this.wrapper?.querySelectorAll(".checklist-group-drag-over").forEach((el) => {
-        el.removeClass("checklist-group-drag-over");
+        if (el instanceof HTMLElement) el.classList.remove("checklist-group-drag-over");
       });
       this.wrapper?.querySelectorAll(".checklist-item-drag-over").forEach((el) => {
-        el.removeClass("checklist-item-drag-over");
+        if (el instanceof HTMLElement) el.classList.remove("checklist-item-drag-over");
       });
     });
-    row.addEventListener("dragover", (e) => {
+    row.addEventListener("dragover", (e: DragEvent) => {
       if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
       e.preventDefault();
       e.stopPropagation();
       e.dataTransfer.dropEffect = "move";
-      row.addClass("checklist-item-drag-over");
+      row.classList.add("checklist-item-drag-over");
     });
     row.addEventListener("dragleave", () => {
-      row.removeClass("checklist-item-drag-over");
+      row.classList.remove("checklist-item-drag-over");
     });
-    row.addEventListener("drop", (e) => {
-      row.removeClass("checklist-item-drag-over");
+    row.addEventListener("drop", (e: DragEvent) => {
+      row.classList.remove("checklist-item-drag-over");
       const payload = this.parseDragPayload(e);
       if (!payload) return;
       e.preventDefault();
@@ -807,7 +818,8 @@ export default class ChecklistPlugin extends Plugin {
           curSrc.splice(srcIdx, 0, restored);
           await this.app.vault.modify(todo.file, curSrc.join("\n"));
         });
-        await this.updateIndex(this.app.vault.getAbstractFileByPath(srcPath) as TFile);
+        const srcFile = this.app.vault.getAbstractFileByPath(srcPath);
+        if (srcFile instanceof TFile) await this.updateIndex(srcFile);
       }
       await this.updateIndex(targetFile);
     });
