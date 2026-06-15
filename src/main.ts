@@ -71,6 +71,54 @@ function isExcludedByKeyword(text: string, keywords: string[]): boolean {
 const TODO_OPEN_RE = /^\s*(?:>\s*)*-\s\[ \]\s(.+)/;
 const TODO_OPEN_PREFIX = /^\s*(?:>\s*)*-\s\[ \]/;
 const TODO_DONE_PREFIX = /^\s*(?:>\s*)*-\s\[x\]/;
+const CALLOUT_OPEN_RE = /^\s*((?:>\s*)*)\[!([a-zA-Z0-9-]+)\]([+-])?/;
+
+function blockquotePrefix(line: string): string {
+  const m = line.match(/^\s*((?:>\s*)*)/);
+  return m?.[1] ?? "";
+}
+
+function blockquoteDepth(prefix: string): number {
+  return (prefix.match(/>/g) ?? []).length;
+}
+
+function findCalloutHeaderLine(lines: string[], todoIdx: number): number | null {
+  const todoDepth = blockquoteDepth(blockquotePrefix(lines[todoIdx] ?? ""));
+  if (todoDepth === 0) return null;
+
+  for (let i = todoIdx - 1; i >= 0; i--) {
+    const line = lines[i];
+    const depth = blockquoteDepth(blockquotePrefix(line));
+    if (depth === 0) break;
+    if (depth > todoDepth) continue;
+    if (depth < todoDepth) break;
+    if (CALLOUT_OPEN_RE.test(line)) return i;
+  }
+  return null;
+}
+
+function collectMigrationLines(lines: string[], indices: number[]): string[] {
+  const sorted = [...new Set(indices)].sort((a, b) => a - b);
+  const groups = new Map<string, { order: number; lines: string[] }>();
+
+  for (const idx of sorted) {
+    const line = lines[idx];
+    if (!line || !TODO_OPEN_PREFIX.test(line)) continue;
+    const headerIdx = findCalloutHeaderLine(lines, idx);
+    const key = headerIdx !== null ? `h:${headerIdx}` : `t:${idx}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        order: headerIdx ?? idx,
+        lines: headerIdx !== null ? [lines[headerIdx]] : [],
+      });
+    }
+    groups.get(key)!.lines.push(line);
+  }
+
+  return [...groups.values()]
+    .sort((a, b) => a.order - b.order)
+    .flatMap((group) => group.lines);
+}
 
 // Minimal shape of the Daily Notes core plugin we touch. The internalPlugins
 // container isn't in Obsidian's public type definitions, so we declare just
@@ -417,7 +465,8 @@ class ChecklistView extends ItemView {
       void this.plugin.app.workspace.openLinkText(target + subpath, source, false);
     });
     text.addEventListener("click", (e: MouseEvent) => {
-      if (!(e.target instanceof HTMLElement) || !e.target.classList.contains("checklist-inline-link")) {
+      const target = e.targetNode;
+      if (!target?.instanceOf(HTMLElement) || !target.classList.contains("checklist-inline-link")) {
         void this.plugin.navigateToTodo(todo);
       }
     });
@@ -459,10 +508,10 @@ class ChecklistView extends ItemView {
     row.addEventListener("dragend", () => {
       row.classList.remove("checklist-item-dragging");
       this.wrapper?.querySelectorAll(".checklist-group-drag-over").forEach((el) => {
-        if (el instanceof HTMLElement) el.classList.remove("checklist-group-drag-over");
+        if (el.instanceOf(HTMLElement)) el.classList.remove("checklist-group-drag-over");
       });
       this.wrapper?.querySelectorAll(".checklist-item-drag-over").forEach((el) => {
-        if (el instanceof HTMLElement) el.classList.remove("checklist-item-drag-over");
+        if (el.instanceOf(HTMLElement)) el.classList.remove("checklist-item-drag-over");
       });
     });
     row.addEventListener("dragover", (e: DragEvent) => {
@@ -506,6 +555,7 @@ export default class ChecklistPlugin extends Plugin {
   private lastProcessedContent = new Map<string, string>();
   private lastModifiedFile: TFile | null = null;
   private undoStack: Array<() => Promise<void>> = [];
+  private suppressRollOverOnCreate = false;
 
   private enqueue(fn: () => Promise<void>): Promise<void> {
     this.writeQueue = this.writeQueue.then(fn);
@@ -530,9 +580,18 @@ export default class ChecklistPlugin extends Plugin {
 
     this.app.workspace.onLayoutReady(async () => {
       await this.buildIndex();
-      await this.migratePastTodosToToday();
       this.refreshView();
     });
+
+    this.registerEvent(
+      this.app.vault.on("create", (file) => {
+        if (!(file instanceof TFile) || file.extension !== "md") return;
+        if (!this.settings.movePastTodosToToday) return;
+        if (this.suppressRollOverOnCreate) return;
+        if (!this.isTodayDateNote(file)) return;
+        void this.migratePastTodosToToday(file);
+      })
+    );
 
     // Detect checkbox toggles immediately as the user types/presses Cmd+L
     this.registerEvent(this.app.workspace.on("editor-change", (editor, view) => {
@@ -682,8 +741,27 @@ export default class ChecklistPlugin extends Plugin {
     }
   }
 
+  async runRollOverToToday(): Promise<void> {
+    if (!this.settings.movePastTodosToToday) return;
+    this.suppressRollOverOnCreate = true;
+    try {
+      const todayNote = await this.getOrCreateTodayNote();
+      if (!todayNote) return;
+      await this.migratePastTodosToToday(todayNote);
+      this.refreshView();
+    } finally {
+      this.suppressRollOverOnCreate = false;
+    }
+  }
+
   private isDateNote(file: TFile, format: string): boolean {
     return moment(file.basename, format, true).isValid();
+  }
+
+  private isTodayDateNote(file: TFile): boolean {
+    const format = this.getDateNotesFormat();
+    const parsed = moment(file.basename, format, true);
+    return parsed.isValid() && parsed.isSame(moment(), "day");
   }
 
   private getEditorForFile(file: TFile): Editor | null {
@@ -846,13 +924,12 @@ export default class ChecklistPlugin extends Plugin {
     });
   }
 
-  async migratePastTodosToToday(): Promise<void> {
+  async migratePastTodosToToday(todayNote: TFile): Promise<void> {
     if (!this.settings.movePastTodosToToday) return;
 
     const format = this.getDateNotesFormat();
     const today = moment().startOf("day");
-    const todayNote = await this.getOrCreateTodayNote();
-    if (!todayNote) return;
+    if (!this.isTodayDateNote(todayNote)) return;
 
     const removals = new Map<string, number[]>();
 
@@ -879,9 +956,7 @@ export default class ChecklistPlugin extends Plugin {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
       const lines = (await this.app.vault.cachedRead(file)).split("\n");
-      for (const idx of [...indices].sort((a, b) => a - b)) {
-        if (lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) linesToMove.push(lines[idx]);
-      }
+      linesToMove.push(...collectMigrationLines(lines, indices));
     }
     if (linesToMove.length === 0) return;
 
@@ -1020,15 +1095,15 @@ class ChecklistSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Roll over open todos")
       .setDesc(
-        "Move open todos from past daily notes into today's daily note on startup. " +
-          "Past notes are detected using your Daily Notes date format."
+        "When today's daily note is created (e.g. via the Daily Notes shortcut), or when this " +
+          "setting is turned on, move open todos from past daily notes into it. Callout headers " +
+          "are copied with todos inside callouts. Past notes are detected using your Daily Notes date format."
       )
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.movePastTodosToToday).onChange(async (value) => {
           this.plugin.settings.movePastTodosToToday = value;
           await this.plugin.saveSettings();
-          if (value) await this.plugin.migratePastTodosToToday();
-          this.plugin.refreshView();
+          if (value) await this.plugin.runRollOverToToday();
         })
       );
   }
