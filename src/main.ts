@@ -26,12 +26,14 @@ interface ChecklistSettings {
   sortMode: SortMode;
   dateNotesOnly: boolean;
   movePastTodosToToday: boolean;
+  excludeKeywords: string;
 }
 
 const DEFAULT_SETTINGS: ChecklistSettings = {
   sortMode: "recent",
   dateNotesOnly: false,
   movePastTodosToToday: false,
+  excludeKeywords: "",
 };
 
 interface DragTodoPayload {
@@ -52,6 +54,16 @@ function isDragTodoPayload(value: unknown): value is DragTodoPayload {
     typeof payload.lineIndex === "number" &&
     typeof payload.occurrence === "number"
   );
+}
+
+function parseExcludeKeywords(raw: string): string[] {
+  return raw.split(",").map((k) => k.trim()).filter((k) => k.length > 0);
+}
+
+function isExcludedByKeyword(text: string, keywords: string[]): boolean {
+  if (keywords.length === 0) return false;
+  const lower = text.toLowerCase();
+  return keywords.some((k) => lower.includes(k.toLowerCase()));
 }
 
 // Todo lines, with optional callout prefix(es): "  > > - [ ] text" matches.
@@ -218,9 +230,7 @@ class ChecklistView extends ItemView {
         this.groupEls.clear();
         this.displayOrder = [];
       }
-      const emptyText = this.plugin.settings.dateNotesOnly
-        ? "No open todos in date notes."
-        : "No open todos.";
+      const emptyText = this.plugin.getEmptyMessage();
       if (!this.emptyEl) {
         this.emptyEl = container.createDiv({ cls: "checklist-empty", text: emptyText });
       } else {
@@ -610,11 +620,15 @@ export default class ChecklistPlugin extends Plugin {
   getAllTodos(): TodoItem[] {
     const todos: TodoItem[] = [];
     const dateFilter = this.settings.dateNotesOnly ? this.getDateNotesFormat() : null;
+    const excludeKeywords = parseExcludeKeywords(this.settings.excludeKeywords);
     for (const [path, items] of this.index) {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
       if (dateFilter !== null && !this.isDateNote(file, dateFilter)) continue;
-      for (const item of items) todos.push({ file, lineIndex: item.lineIndex, text: item.text });
+      for (const item of items) {
+        if (isExcludedByKeyword(item.text, excludeKeywords)) continue;
+        todos.push({ file, lineIndex: item.lineIndex, text: item.text });
+      }
     }
     if (this.settings.sortMode === "alpha") {
       todos.sort((a, b) => {
@@ -628,6 +642,13 @@ export default class ChecklistPlugin extends Plugin {
       });
     }
     return todos;
+  }
+
+  getEmptyMessage(): string {
+    const hasFilters =
+      this.settings.dateNotesOnly ||
+      parseExcludeKeywords(this.settings.excludeKeywords).length > 0;
+    return hasFilters ? "No open todos match the current filters." : "No open todos.";
   }
 
   private getDailyNotesPlugin(): DailyNotesPluginInstance | null {
@@ -980,6 +1001,20 @@ class ChecklistSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
           this.plugin.applySettingsToViews();
         })
+      );
+
+    new Setting(containerEl)
+      .setName("Exclude keywords")
+      .setDesc("Comma-separated words. Todos containing any keyword are hidden from the panel (case-insensitive).")
+      .addText((text) =>
+        text
+          .setPlaceholder("define, ai, TODO")
+          .setValue(this.plugin.settings.excludeKeywords)
+          .onChange(async (value) => {
+            this.plugin.settings.excludeKeywords = value;
+            await this.plugin.saveSettings();
+            this.plugin.applySettingsToViews();
+          })
       );
 
     new Setting(containerEl)
