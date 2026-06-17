@@ -20,7 +20,21 @@ interface TodoItem {
   text: string;
 }
 
-type SortMode = "recent" | "alpha";
+type SortMode = "recent" | "oldest" | "alpha" | "alpha-desc";
+
+function compareNoteGroups(a: TFile, b: TFile, mode: SortMode): number {
+  switch (mode) {
+    case "alpha":
+      return a.basename.localeCompare(b.basename);
+    case "alpha-desc":
+      return b.basename.localeCompare(a.basename);
+    case "oldest":
+      return a.stat.mtime - b.stat.mtime;
+    case "recent":
+    default:
+      return b.stat.mtime - a.stat.mtime;
+  }
+}
 
 interface ChecklistSettings {
   sortMode: SortMode;
@@ -134,9 +148,22 @@ interface AppWithInternalPlugins {
   internalPlugins?: InternalPluginContainer;
 }
 
-// Matches [[target]], [[target|alias]], [[target#heading]], [[target#heading|alias]]
-// and markdown links [label](target)
-const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[([^\]]+)\]\(([^)]+)\)/g;
+// Matches [[target]], [[target|alias]], [[target#heading]], [[target#heading|alias]],
+// markdown links [label](target), and bare http(s) URLs.
+const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s)<>]+)/g;
+
+// External URL = anything with a scheme (http:, https:, mailto:, ftp:, obsidian:, …).
+// Vault-relative targets like "Notes/foo" or "#heading" don't match.
+function isExternalUrl(target: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:/i.test(target);
+}
+
+function createExternalLink(container: HTMLElement, label: string, href: string): void {
+  const link = container.createEl("a", { cls: "checklist-inline-link", text: label, href });
+  link.setAttr("target", "_blank");
+  link.setAttr("rel", "noopener noreferrer");
+  link.addEventListener("click", (e) => { e.stopPropagation(); });
+}
 
 function renderTodoText(
   container: HTMLElement,
@@ -156,9 +183,18 @@ function renderTodoText(
       const subpath = heading ? `#${heading}` : "";
       const link = container.createEl("a", { cls: "checklist-inline-link", text: label });
       link.addEventListener("click", (e) => { e.stopPropagation(); openLink(target, subpath, sourcePath); });
+    } else if (m[4] !== undefined) {
+      const label = m[4];
+      const target = m[5];
+      if (isExternalUrl(target)) {
+        createExternalLink(container, label, target);
+      } else {
+        const link = container.createEl("a", { cls: "checklist-inline-link", text: label });
+        link.addEventListener("click", (e) => { e.stopPropagation(); openLink(target, "", sourcePath); });
+      }
     } else {
-      const link = container.createEl("a", { cls: "checklist-inline-link", text: m[4] });
-      link.addEventListener("click", (e) => { e.stopPropagation(); openLink(m![5], "", sourcePath); });
+      const url = m[6];
+      createExternalLink(container, url, url);
     }
     last = m.index + m[0].length;
   }
@@ -298,14 +334,20 @@ class ChecklistView extends ItemView {
       grouped.get(todo.file.path)!.push(todo);
     }
 
-    // ── Determine display order based on sort mode ───────────────────────────
-    if (this.plugin.settings.sortMode === "alpha") {
-      // Strictly alphabetical by file basename, recomputed each render.
-      this.displayOrder = [...grouped.keys()].sort((a, b) => {
-        const fa = grouped.get(a)![0].file;
-        const fb = grouped.get(b)![0].file;
-        return fa.basename.localeCompare(fb.basename);
-      });
+    // ── Determine display order of note groups (not individual todos) ────────
+    if (this.plugin.settings.sortMode === "alpha" || this.plugin.settings.sortMode === "alpha-desc") {
+      this.displayOrder = [...grouped.keys()].sort((a, b) =>
+        compareNoteGroups(grouped.get(a)![0].file, grouped.get(b)![0].file, this.plugin.settings.sortMode)
+      );
+    } else if (this.plugin.settings.sortMode === "oldest") {
+      // Stable order — keep existing positions, append new note groups by oldest mtime first.
+      this.displayOrder = this.displayOrder.filter(p => grouped.has(p));
+      const newPaths = [...grouped.keys()]
+        .filter(p => !this.displayOrder.includes(p))
+        .sort((a, b) =>
+          compareNoteGroups(grouped.get(a)![0].file, grouped.get(b)![0].file, "oldest")
+        );
+      this.displayOrder = [...this.displayOrder, ...newPaths];
     } else {
       // Recent: stable order — keep existing positions, prepend new files
       // sorted by mtime (newest first). Prevents the list from jumping when
@@ -313,11 +355,9 @@ class ChecklistView extends ItemView {
       this.displayOrder = this.displayOrder.filter(p => grouped.has(p));
       const newPaths = [...grouped.keys()]
         .filter(p => !this.displayOrder.includes(p))
-        .sort((a, b) => {
-          const fa = grouped.get(a)![0].file;
-          const fb = grouped.get(b)![0].file;
-          return fb.stat.mtime - fa.stat.mtime;
-        });
+        .sort((a, b) =>
+          compareNoteGroups(grouped.get(a)![0].file, grouped.get(b)![0].file, "recent")
+        );
       this.displayOrder = [...newPaths, ...this.displayOrder];
     }
     const orderedPaths = this.displayOrder;
@@ -689,17 +729,10 @@ export default class ChecklistPlugin extends Plugin {
         todos.push({ file, lineIndex: item.lineIndex, text: item.text });
       }
     }
-    if (this.settings.sortMode === "alpha") {
-      todos.sort((a, b) => {
-        const c = a.file.basename.localeCompare(b.file.basename);
-        return c !== 0 ? c : a.lineIndex - b.lineIndex;
-      });
-    } else {
-      todos.sort((a, b) => {
-        const d = b.file.stat.mtime - a.file.stat.mtime;
-        return d !== 0 ? d : a.lineIndex - b.lineIndex;
-      });
-    }
+    todos.sort((a, b) => {
+      const c = compareNoteGroups(a.file, b.file, this.settings.sortMode);
+      return c !== 0 ? c : a.lineIndex - b.lineIndex;
+    });
     return todos;
   }
 
@@ -1053,12 +1086,16 @@ class ChecklistSettingTab extends PluginSettingTab {
     containerEl.empty();
 
     new Setting(containerEl)
-      .setName("Sort order")
-      .setDesc("How todos are ordered in the panel.")
+      .setName("Note sort order")
+      .setDesc(
+        "How note groups are ordered in the panel. Todos within each note keep their order in the file."
+      )
       .addDropdown((dropdown) =>
         dropdown
-          .addOption("recent", "Most recently modified")
-          .addOption("alpha", "Alphabetical (A–Z)")
+          .addOption("recent", "Recently modified note first")
+          .addOption("oldest", "Least recently modified note first")
+          .addOption("alpha", "Note name (A–Z)")
+          .addOption("alpha-desc", "Note name (Z–A)")
           .setValue(this.plugin.settings.sortMode)
           .onChange(async (value) => {
             this.plugin.settings.sortMode = value as SortMode;
