@@ -145,6 +145,47 @@ function collectMigrationLines(lines: string[], indices: number[]): string[] {
   return result;
 }
 
+// After the open todos inside a callout have been moved out, the callout can be
+// left with just its header (and empty blockquote lines). Given the indices of
+// the todos being removed, returns the extra line indices — the callout header
+// and any now-empty blockquote lines belonging to it — that should be removed
+// too, but only for callouts that (a) contained a moved todo and (b) have no
+// other content left. Blank lines surrounding the callout are left untouched so
+// the separation to neighbouring callouts and todos is kept.
+function collectEmptyCalloutRemovals(lines: string[], removedTodoIndices: number[]): number[] {
+  const removed = new Set(removedTodoIndices);
+  const extra: number[] = [];
+
+  for (let h = 0; h < lines.length; h++) {
+    if (!CALLOUT_OPEN_RE.test(lines[h])) continue;
+    const headerDepth = blockquoteDepth(blockquotePrefix(lines[h]));
+    if (headerDepth === 0) continue;
+
+    // The callout body spans the following lines that stay within its blockquote.
+    let end = h + 1;
+    while (end < lines.length && blockquoteDepth(blockquotePrefix(lines[end])) >= headerDepth) {
+      end++;
+    }
+
+    let hadMovedTodo = false;
+    let hasRemainingContent = false;
+    for (let i = h + 1; i < end; i++) {
+      if (removed.has(i)) {
+        hadMovedTodo = true;
+        continue;
+      }
+      const content = lines[i].replace(/^\s*(?:>\s*)*/, "").trim();
+      if (content.length > 0) hasRemainingContent = true;
+    }
+
+    if (hadMovedTodo && !hasRemainingContent) {
+      for (let i = h; i < end; i++) if (!removed.has(i)) extra.push(i);
+    }
+  }
+
+  return extra;
+}
+
 // Minimal shape of the Daily Notes core plugin we touch. The internalPlugins
 // container isn't in Obsidian's public type definitions, so we declare just
 // enough to safely read the format setting.
@@ -1018,9 +1059,13 @@ export default class ChecklistPlugin extends Plugin {
           );
           if (validIndices.length === 0) continue;
           linesToMove.push(...collectMigrationLines(lines, validIndices));
-          for (const idx of [...new Set(validIndices)].sort((a, b) => b - a)) {
-            lines.splice(idx, 1);
+          // Remove the moved todos, plus the header of any callout that is left
+          // empty once its todos are gone.
+          const toRemove = new Set(validIndices);
+          for (const idx of collectEmptyCalloutRemovals(lines, validIndices)) {
+            toRemove.add(idx);
           }
+          for (const idx of [...toRemove].sort((a, b) => b - a)) lines.splice(idx, 1);
           await this.app.vault.modify(file, lines.join("\n"));
           await this.updateIndex(file);
         }
