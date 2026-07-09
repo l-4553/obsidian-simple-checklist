@@ -149,8 +149,8 @@ interface AppWithInternalPlugins {
 }
 
 // Matches [[target]], [[target|alias]], [[target#heading]], [[target#heading|alias]],
-// markdown links [label](target), and bare http(s) URLs.
-const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s)<>]+)/g;
+// markdown links [label](target), bare http(s) URLs, and inline code `code`.
+const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s)<>]+)|`([^`]+)`/g;
 
 // External URL = anything with a scheme (http:, https:, mailto:, ftp:, obsidian:, …).
 // Vault-relative targets like "Notes/foo" or "#heading" don't match.
@@ -192,9 +192,11 @@ function renderTodoText(
         const link = container.createEl("a", { cls: "checklist-inline-link", text: label });
         link.addEventListener("click", (e) => { e.stopPropagation(); openLink(target, "", sourcePath); });
       }
-    } else {
+    } else if (m[6] !== undefined) {
       const url = m[6];
       createExternalLink(container, url, url);
+    } else {
+      container.createEl("code", { cls: "checklist-inline-code", text: m[7] });
     }
     last = m.index + m[0].length;
   }
