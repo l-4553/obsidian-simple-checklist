@@ -986,29 +986,35 @@ export default class ChecklistPlugin extends Plugin {
       }
     }
 
-    const linesToMove: string[] = [];
-    for (const [path, indices] of removals) {
-      const file = this.app.vault.getAbstractFileByPath(path);
-      if (!(file instanceof TFile)) continue;
-      const lines = (await this.app.vault.cachedRead(file)).split("\n");
-      linesToMove.push(...collectMigrationLines(lines, indices));
-    }
-    if (linesToMove.length === 0) return;
+    if (removals.size === 0) return;
 
     return this.enqueue(async () => {
       this.suppressRefresh = true;
       try {
+        // Collect the lines to move and remove them from the source note in a
+        // single fresh read, inside the write queue. This keeps move-and-remove
+        // atomic: a todo is only appended to today's note if it was actually
+        // removed from its source, so a stale index can never leave the old
+        // todo behind (duplicated) instead of moving it over.
+        const linesToMove: string[] = [];
         for (const [path, indices] of removals) {
           const file = this.app.vault.getAbstractFileByPath(path);
           if (!(file instanceof TFile)) continue;
           const content = await this.app.vault.read(file);
           const lines = content.split("\n");
-          for (const idx of [...new Set(indices)].sort((a, b) => b - a)) {
-            if (lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) lines.splice(idx, 1);
+          const validIndices = indices.filter(
+            (idx) => lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])
+          );
+          if (validIndices.length === 0) continue;
+          linesToMove.push(...collectMigrationLines(lines, validIndices));
+          for (const idx of [...new Set(validIndices)].sort((a, b) => b - a)) {
+            lines.splice(idx, 1);
           }
           await this.app.vault.modify(file, lines.join("\n"));
           await this.updateIndex(file);
         }
+
+        if (linesToMove.length === 0) return;
 
         const todayContent = await this.app.vault.read(todayNote);
         const todayLines = todayContent.length > 0 ? todayContent.split("\n") : [];
