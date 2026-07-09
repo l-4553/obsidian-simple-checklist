@@ -113,7 +113,7 @@ function findCalloutHeaderLine(lines: string[], todoIdx: number): number | null 
 
 function collectMigrationLines(lines: string[], indices: number[]): string[] {
   const sorted = [...new Set(indices)].sort((a, b) => a - b);
-  const groups = new Map<string, { order: number; lines: string[] }>();
+  const groups = new Map<string, { start: number; end: number; lines: string[] }>();
 
   for (const idx of sorted) {
     const line = lines[idx];
@@ -122,16 +122,27 @@ function collectMigrationLines(lines: string[], indices: number[]): string[] {
     const key = headerIdx !== null ? `h:${headerIdx}` : `t:${idx}`;
     if (!groups.has(key)) {
       groups.set(key, {
-        order: headerIdx ?? idx,
+        start: headerIdx ?? idx,
+        end: idx,
         lines: headerIdx !== null ? [lines[headerIdx]] : [],
       });
     }
-    groups.get(key)!.lines.push(line);
+    const group = groups.get(key)!;
+    group.lines.push(line);
+    group.end = idx;
   }
 
-  return [...groups.values()]
-    .sort((a, b) => a.order - b.order)
-    .flatMap((group) => group.lines);
+  // Keep a single blank line between groups of todos that were separated by a
+  // blank line in the source note (todos "grouped" by newline). Todos that sat
+  // directly next to each other stay adjacent.
+  const result: string[] = [];
+  let prevEnd: number | null = null;
+  for (const group of [...groups.values()].sort((a, b) => a.start - b.start)) {
+    if (prevEnd !== null && group.start - prevEnd > 1) result.push("");
+    result.push(...group.lines);
+    prevEnd = group.end;
+  }
+  return result;
 }
 
 // Minimal shape of the Daily Notes core plugin we touch. The internalPlugins
