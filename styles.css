@@ -17,6 +17,13 @@
   padding: 6px 12px 2px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  cursor: pointer;
+  width: fit-content;
+}
+
+.checklist-group-title:hover {
+  color: var(--text-normal);
+  text-decoration: underline;
 }
 
 .checklist-divider {
