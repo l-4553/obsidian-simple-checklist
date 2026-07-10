@@ -41,6 +41,8 @@ interface ChecklistSettings {
   dateNotesOnly: boolean;
   movePastTodosToToday: boolean;
   excludeKeywords: string;
+  // Note paths pinned to the top of the panel, in pin order (most-recent last).
+  pinnedPaths: string[];
 }
 
 const DEFAULT_SETTINGS: ChecklistSettings = {
@@ -48,6 +50,7 @@ const DEFAULT_SETTINGS: ChecklistSettings = {
   dateNotesOnly: false,
   movePastTodosToToday: false,
   excludeKeywords: "",
+  pinnedPaths: [],
 };
 
 interface DragTodoPayload {
@@ -414,7 +417,14 @@ class ChecklistView extends ItemView {
         );
       this.displayOrder = [...newPaths, ...this.displayOrder];
     }
-    const orderedPaths = this.displayOrder;
+    // ── Pinned groups float to the top, in pin order; the rest keep their order.
+    const pinned = this.plugin.settings.pinnedPaths;
+    const orderedPaths = pinned.some(p => grouped.has(p))
+      ? [
+          ...pinned.filter(p => grouped.has(p)),
+          ...this.displayOrder.filter(p => !pinned.includes(p)),
+        ]
+      : this.displayOrder;
 
     // ── Remove stale groups ───────────────────────────────────────────────────
     for (const [path, { group }] of this.groupEls) {
@@ -458,9 +468,19 @@ class ChecklistView extends ItemView {
       let groupData = this.groupEls.get(filePath);
       if (!groupData) {
         const group = createDiv({ cls: "checklist-group" });
-        const title = group.createDiv({ cls: "checklist-group-title", text: items[0].file.basename });
+        const header = group.createDiv({ cls: "checklist-group-header" });
+        const title = header.createDiv({ cls: "checklist-group-title", text: items[0].file.basename });
         const titleFile = items[0].file;
         title.addEventListener("click", () => { void this.plugin.navigateToFile(titleFile); });
+
+        const pin = header.createDiv({ cls: "checklist-group-pin" });
+        setIcon(pin, "pin");
+        pin.setAttr("aria-label", "Pin to top");
+        pin.addEventListener("click", (e: MouseEvent) => {
+          e.stopPropagation();
+          void this.plugin.togglePin(filePath).then(() => this.plugin.refreshView());
+        });
+
         groupData = { group, title };
         this.groupEls.set(filePath, groupData);
         this.setupGroupDrop(group, items[0].file);
@@ -468,6 +488,7 @@ class ChecklistView extends ItemView {
         groupData.title.setText(items[0].file.basename);
       }
 
+      groupData.group.classList.toggle("is-pinned", pinned.includes(filePath));
       this.wrapper.appendChild(groupData.group);
 
       // Reconcile items using text-based keys
@@ -1085,6 +1106,13 @@ export default class ChecklistPlugin extends Plugin {
         this.refreshView();
       }
     });
+  }
+
+  async togglePin(path: string): Promise<void> {
+    const i = this.settings.pinnedPaths.indexOf(path);
+    if (i >= 0) this.settings.pinnedPaths.splice(i, 1);
+    else this.settings.pinnedPaths.push(path);
+    await this.saveSettings();
   }
 
   async navigateToFile(file: TFile): Promise<void> {
