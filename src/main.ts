@@ -459,6 +459,8 @@ class ChecklistView extends ItemView {
       if (!groupData) {
         const group = createDiv({ cls: "checklist-group" });
         const title = group.createDiv({ cls: "checklist-group-title", text: items[0].file.basename });
+        const titleFile = items[0].file;
+        title.addEventListener("click", () => { void this.plugin.navigateToFile(titleFile); });
         groupData = { group, title };
         this.groupEls.set(filePath, groupData);
         this.setupGroupDrop(group, items[0].file);
@@ -1083,6 +1085,17 @@ export default class ChecklistPlugin extends Plugin {
         this.refreshView();
       }
     });
+  }
+
+  async navigateToFile(file: TFile): Promise<void> {
+    const leaf =
+      this.app.workspace.getLeavesOfType("markdown").find(
+        (l) => (l.view as MarkdownView).file?.path === file.path
+      ) ??
+      this.app.workspace.getLeavesOfType("markdown")[0] ??
+      this.app.workspace.getLeaf(false);
+
+    await leaf.openFile(file, { active: true });
   }
 
   async navigateToTodo(todo: TodoItem): Promise<void> {
