@@ -12,6 +12,13 @@ import {
   WorkspaceLeaf,
 } from "obsidian";
 
+// Obsidian re-exports its bundled moment instance. Some type-checkers — including
+// the community plugin review scanner — widen that re-export to `any`, which trips
+// @typescript-eslint's no-unsafe-* rules on every moment call. Re-bind it through
+// moment's real module type so all the date logic below stays fully type-checked.
+// (The `moment.Moment` type from the original import is still used for typing.)
+const typedMoment = moment as unknown as typeof import("moment");
+
 const VIEW_TYPE = "checklist";
 
 interface TodoItem {
@@ -324,7 +331,7 @@ class ChecklistView extends ItemView {
   getViewType(): string { return VIEW_TYPE; }
   getDisplayText(): string { return "Checklist"; }
   getIcon(): string { return "check-square"; }
-  async onOpen(): Promise<void> {
+  onOpen(): Promise<void> {
     this.render();
     // Forward Cmd/Ctrl+Z to the last-modified editor, or our own undo stack if file isn't open
     this.containerEl.addEventListener("keydown", (e) => {
@@ -338,8 +345,9 @@ class ChecklistView extends ItemView {
         void this.plugin.undoLastSidebarAction();
       }
     });
+    return Promise.resolve();
   }
-  async onClose(): Promise<void> {}
+  onClose(): Promise<void> { return Promise.resolve(); }
 
   triggerExternalCompletion(filePath: string, completedTexts: Set<string>): void {
     for (const [key, row] of this.rowEls) {
@@ -836,11 +844,11 @@ export default class ChecklistPlugin extends Plugin {
     const daily = this.getDailyNotesPlugin();
     if (!daily) return null;
     if (daily.createDailyNote) {
-      return daily.createDailyNote(moment());
+      return daily.createDailyNote(typedMoment());
     }
     const format = this.getDateNotesFormat();
     const folder = daily.options?.folder ?? "";
-    const name = `${moment().format(format)}.md`;
+    const name = `${typedMoment().format(format)}.md`;
     const path = folder ? `${folder}/${name}` : name;
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) return existing;
@@ -865,13 +873,13 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   private isDateNote(file: TFile, format: string): boolean {
-    return moment(file.basename, format, true).isValid();
+    return typedMoment(file.basename, format, true).isValid();
   }
 
   private isTodayDateNote(file: TFile): boolean {
     const format = this.getDateNotesFormat();
-    const parsed = moment(file.basename, format, true);
-    return parsed.isValid() && parsed.isSame(moment(), "day");
+    const parsed = typedMoment(file.basename, format, true);
+    return parsed.isValid() && parsed.isSame(typedMoment(), "day");
   }
 
   private getEditorForFile(file: TFile): Editor | null {
@@ -1038,7 +1046,7 @@ export default class ChecklistPlugin extends Plugin {
     if (!this.settings.movePastTodosToToday) return;
 
     const format = this.getDateNotesFormat();
-    const today = moment().startOf("day");
+    const today = typedMoment().startOf("day");
     if (!this.isTodayDateNote(todayNote)) return;
 
     const removals = new Map<string, number[]>();
@@ -1047,7 +1055,7 @@ export default class ChecklistPlugin extends Plugin {
       if (path === todayNote.path) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
-      const noteDate = moment(file.basename, format, true);
+      const noteDate = typedMoment(file.basename, format, true);
       if (!noteDate.isValid() || !noteDate.isBefore(today)) continue;
 
       const content = await this.app.vault.cachedRead(file);
@@ -1127,7 +1135,7 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   async navigateToTodo(todo: TodoItem): Promise<void> {
-    let leaf =
+    const leaf =
       this.app.workspace.getLeavesOfType("markdown").find(
         (l) => (l.view as MarkdownView).file?.path === todo.file.path
       ) ??
