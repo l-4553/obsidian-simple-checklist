@@ -1,0 +1,97 @@
+name: Bump & Release
+
+# One-click release, triggered manually from the GitHub Actions UI
+# (Actions -> "Bump & Release" -> Run workflow). Replaces the local
+# "bump manifest.json + package.json, commit, tag, push" dance:
+# it bumps the version (patch by default), commits, tags, builds, and
+# publishes the GitHub release with the built artifacts.
+#
+# This job builds and releases itself rather than relying on the
+# tag-triggered release.yml, because a tag pushed with GITHUB_TOKEN does
+# not trigger other workflows. release.yml still handles tags pushed by
+# hand, so the two never double-release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: Version bump level
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: patch
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  bump-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Bump version (package.json + manifest.json)
+        id: bump
+        env:
+          LEVEL: ${{ inputs.level }}
+        run: |
+          VERSION=$(node -e '
+            const fs = require("fs");
+            const l = process.env.LEVEL || "patch";
+            let [a, b, c] = require("./package.json").version.split(".").map(Number);
+            if (l === "major") { a++; b = 0; c = 0; }
+            else if (l === "minor") { b++; c = 0; }
+            else { c++; }
+            const nv = `${a}.${b}.${c}`;
+            for (const f of ["package.json", "manifest.json"]) {
+              const j = JSON.parse(fs.readFileSync(f, "utf8"));
+              j.version = nv;
+              fs.writeFileSync(f, JSON.stringify(j, null, 2) + "\n");
+            }
+            console.error("bumped to " + nv);
+            process.stdout.write(nv);
+          ')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Commit, tag and push
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json manifest.json
+          git commit -m "Release $VERSION"
+          git tag "$VERSION"
+          git push origin "HEAD:$GITHUB_REF_NAME"
+          git push origin "refs/tags/$VERSION"
+
+      - name: Attest build artifacts
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            main.js
+            styles.css
+            manifest.json
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.bump.outputs.version }}
+          generate_release_notes: true
+          files: |
+            main.js
+            manifest.json
+            styles.css
