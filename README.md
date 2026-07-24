@@ -6,12 +6,22 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 ## Features
 
 - **Vault-wide todo list** — scans every Markdown file and surfaces unchecked `- [ ]` items in one place
-- **Grouped by file** — todos are grouped under their source file, sorted by most recently modified
+- **Grouped by file** — todos are grouped under their source file; click a group title to open that note
 - **Click to navigate** — click a todo to jump directly to that line in the source file
 - **Complete from the panel** — check off a todo; it gets marked `- [x]` in the file, with a small confetti burst
 - **Delete from the panel** — remove a todo from the file entirely using the trash icon
-- **Inline link rendering** — wiki links (`[[Note]]`) and Markdown links inside todo text are rendered as clickable links
+- **Pin notes to the top** — pin a note group so it stays above the rest, regardless of sort order
+- **Drag and drop** — move a todo from one note into another by dragging it between groups
+- **Callout support** — todos written inside callouts (`> - [ ]`) are picked up too, with their callout header preserved
+- **Inline rendering** — wiki links (`[[Note]]`), Markdown links, and inline code (`` `code` ``) inside todo text are rendered inline
 - **Live updates** — the panel refreshes automatically as you edit your notes
+
+## Settings
+
+- **Note sort order** — order groups by most/least recently modified, or note name (A–Z / Z–A)
+- **Date notes only** — show todos only from notes whose filename matches your Daily Notes date format
+- **Exclude keywords** — hide todos containing any of the given comma-separated keywords (case-insensitive)
+- **Roll over open todos** — when today's daily note is created, move open todos from past daily notes into it (callout headers are carried along)
 
 ## Usage
 
