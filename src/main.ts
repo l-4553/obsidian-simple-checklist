@@ -90,6 +90,13 @@ function isExcludedByKeyword(text: string, keywords: string[]): boolean {
   return keywords.some((k) => lower.includes(k.toLowerCase()));
 }
 
+// Priority marker: count the trailing "!" of an item so "!!" ranks above "!"
+// above none. Trailing whitespace is ignored ("do it !! " counts as 2).
+function trailingBangs(text: string): number {
+  const m = text.trimEnd().match(/!+$/);
+  return m ? m[0].length : 0;
+}
+
 // Todo lines, with optional callout prefix(es): "  > > - [ ] text" matches.
 // TODO_OPEN_RE captures the trailing text; the *_PREFIX variants are tests only.
 const TODO_OPEN_RE = /^\s*(?:>\s*)*-\s\[ \]\s(.+)/;
@@ -816,7 +823,11 @@ export default class ChecklistPlugin extends Plugin {
     }
     todos.sort((a, b) => {
       const c = compareNoteGroups(a.file, b.file, this.settings.sortMode);
-      return c !== 0 ? c : a.lineIndex - b.lineIndex;
+      if (c !== 0) return c;
+      // Within a note: more trailing "!" first (!! > ! > none), otherwise keep
+      // the order the items are written in the note.
+      const bangDiff = trailingBangs(b.text) - trailingBangs(a.text);
+      return bangDiff !== 0 ? bangDiff : a.lineIndex - b.lineIndex;
     });
     return todos;
   }
