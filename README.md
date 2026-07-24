@@ -12,6 +12,7 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 - **Complete from the panel** — check off a todo; it gets marked `- [x]` in the file, with a small confetti burst
 - **Delete from the panel** — remove a todo from the file entirely using the trash icon
 - **Inline link rendering** — wiki links (`[[Note]]`) and Markdown links inside todo text are rendered as clickable links
+- **Priority by `!`** — todos ending in `!` float to the top of their note, with `!!` above `!` above none
 - **Live updates** — the panel refreshes automatically as you edit your notes
 
 ## Usage
