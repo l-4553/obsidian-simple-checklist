@@ -25,6 +25,9 @@ interface TodoItem {
   file: TFile;
   lineIndex: number;
   text: string;
+  // Nesting level mirrored from the source note (0 = top level). Optional so that
+  // transient TodoItems built outside getAllTodos default to unindented.
+  depth?: number;
 }
 
 type SortMode = "recent" | "oldest" | "alpha" | "alpha-desc";
@@ -96,6 +99,17 @@ const TODO_OPEN_RE = /^\s*(?:>\s*)*-\s\[ \]\s(.+)/;
 const TODO_OPEN_PREFIX = /^\s*(?:>\s*)*-\s\[ \]/;
 const TODO_DONE_PREFIX = /^\s*(?:>\s*)*-\s\[x\]/;
 const CALLOUT_OPEN_RE = /^\s*((?:>\s*)*)\[!([a-zA-Z0-9-]+)\]([+-])?/;
+
+// Visual width of a todo line's list indentation, in columns (tab = 4). Blockquote
+// markers are stripped first so callout todos aren't counted as list nesting. Used
+// only for relative comparison, so the exact tab size doesn't matter.
+function listIndentWidth(line: string): number {
+  const withoutQuote = line.replace(/^(?:\s*>)+\s?/, "");
+  const lead = /^[\t ]*/.exec(withoutQuote)?.[0] ?? "";
+  const tabs = (lead.match(/\t/g) ?? []).length;
+  // Each tab counts as 4 columns; spaces as 1. Exact size only matters relatively.
+  return lead.length + tabs * 3;
+}
 
 function blockquotePrefix(line: string): string {
   const m = line.match(/^\s*((?:>\s*)*)/);
@@ -512,6 +526,8 @@ class ChecklistView extends ItemView {
           row = this.buildRow(todo, groupData.group, key, occ);
           this.rowEls.set(key, row);
         }
+        // Set on every reconcile so re-indenting a todo in the note updates the row.
+        row.style.setProperty("--checklist-depth", String(todo.depth ?? 0));
         groupData.group.appendChild(row);
       }
     }
@@ -672,7 +688,7 @@ class ChecklistView extends ItemView {
 }
 
 export default class ChecklistPlugin extends Plugin {
-  private index: Map<string, Array<{ lineIndex: number; text: string }>> = new Map();
+  private index: Map<string, Array<{ lineIndex: number; text: string; indent: number }>> = new Map();
   suppressRefresh = false;
   settings: ChecklistSettings = { ...DEFAULT_SETTINGS };
   private writeQueue: Promise<void> = Promise.resolve();
@@ -760,10 +776,10 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   private indexContent(filePath: string, content: string): void {
-    const todos: Array<{ lineIndex: number; text: string }> = [];
+    const todos: Array<{ lineIndex: number; text: string; indent: number }> = [];
     content.split("\n").forEach((line, i) => {
       const m = line.match(TODO_OPEN_RE);
-      if (m) todos.push({ lineIndex: i, text: m[1] });
+      if (m) todos.push({ lineIndex: i, text: m[1], indent: listIndentWidth(line) });
     });
     if (todos.length > 0) this.index.set(filePath, todos);
     else this.index.delete(filePath);
@@ -809,9 +825,16 @@ export default class ChecklistPlugin extends Plugin {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
       if (dateFilter !== null && !this.isDateNote(file, dateFilter)) continue;
+      // Derive each todo's nesting level from the relative indentation of the
+      // todos in this file (in line order), so it mirrors the note structure
+      // regardless of whether the note indents with tabs, 2 or 4 spaces.
+      const stack: number[] = [];
       for (const item of items) {
+        while (stack.length > 0 && stack[stack.length - 1] >= item.indent) stack.pop();
+        const depth = stack.length;
+        stack.push(item.indent);
         if (isExcludedByKeyword(item.text, excludeKeywords)) continue;
-        todos.push({ file, lineIndex: item.lineIndex, text: item.text });
+        todos.push({ file, lineIndex: item.lineIndex, text: item.text, depth });
       }
     }
     todos.sort((a, b) => {

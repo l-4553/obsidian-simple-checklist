@@ -7,6 +7,7 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 
 - **Vault-wide todo list** — scans every Markdown file and surfaces unchecked `- [ ]` items in one place
 - **Grouped by file** — todos are grouped under their source file, sorted by most recently modified
+- **Nested indentation** — sub-todos are indented in the panel to mirror their nesting in the note
 - **Click to navigate** — click a todo to jump directly to that line in the source file
 - **Complete from the panel** — check off a todo; it gets marked `- [x]` in the file, with a small confetti burst
 - **Delete from the panel** — remove a todo from the file entirely using the trash icon

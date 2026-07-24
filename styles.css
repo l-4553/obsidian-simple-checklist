@@ -71,7 +71,9 @@
   display: flex;
   align-items: flex-start;
   gap: 8px;
+  /* Nested todos mirror the note's structure: 2ch (~2 spaces) of extra indent per level. */
   padding: 4px 12px;
+  padding-left: calc(12px + var(--checklist-depth, 0) * 2ch);
   border-radius: 4px;
   cursor: default;
 }
