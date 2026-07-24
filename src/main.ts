@@ -127,6 +127,26 @@ function blockquoteDepth(prefix: string): number {
   return (prefix.match(/>/g) ?? []).length;
 }
 
+// Given a todo line's index, return the indices of the lines directly nested
+// underneath it — the contiguous run of following lines that are more deeply
+// indented, within the same blockquote context. These are the todo's child
+// items (and their wrapped content), so they travel with the todo when it is
+// moved. Stops at the first blank line, a line at the same or shallower
+// indentation, or a change in blockquote depth.
+function collectDescendantLines(lines: string[], parentIdx: number): number[] {
+  const parentIndent = listIndentWidth(lines[parentIdx]);
+  const parentQuoteDepth = blockquoteDepth(blockquotePrefix(lines[parentIdx]));
+  const result: number[] = [];
+  for (let i = parentIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim().length === 0) break;
+    if (blockquoteDepth(blockquotePrefix(line)) !== parentQuoteDepth) break;
+    if (listIndentWidth(line) <= parentIndent) break;
+    result.push(i);
+  }
+  return result;
+}
+
 function findCalloutHeaderLine(lines: string[], todoIdx: number): number | null {
   const todoDepth = blockquoteDepth(blockquotePrefix(lines[todoIdx] ?? ""));
   if (todoDepth === 0) return null;
@@ -1033,12 +1053,17 @@ export default class ChecklistPlugin extends Plugin {
         const lines = content.split("\n");
         const srcIdx = this.findTodoLine(lines, todo);
         if (srcIdx < 0) return;
-        const todoLine = lines[srcIdx];
-        lines.splice(srcIdx, 1);
+        // Move the todo together with its nested children (indented lines that
+        // follow it), so dragging a parent keeps its sub-items attached.
+        const blockLen = 1 + collectDescendantLines(lines, srcIdx).length;
+        // Dropping onto the todo itself or one of its own children is a no-op.
+        if (insertBeforeLine !== undefined && insertBeforeLine > srcIdx && insertBeforeLine < srcIdx + blockLen) return;
+        const block = lines.slice(srcIdx, srcIdx + blockLen);
+        lines.splice(srcIdx, blockLen);
         let insertIdx = insertBeforeLine ?? lines.length;
-        if (srcIdx < insertIdx) insertIdx--;
+        if (srcIdx < insertIdx) insertIdx -= blockLen;
         if (insertIdx === srcIdx) return;
-        lines.splice(insertIdx, 0, todoLine);
+        lines.splice(insertIdx, 0, ...block);
         await this.app.vault.modify(todo.file, lines.join("\n"));
         this.lastModifiedFile = todo.file;
       } else {
@@ -1046,13 +1071,15 @@ export default class ChecklistPlugin extends Plugin {
         const srcLines = srcContent.split("\n");
         const srcIdx = this.findTodoLine(srcLines, todo);
         if (srcIdx < 0) return;
-        const todoLine = srcLines[srcIdx];
-        srcLines.splice(srcIdx, 1);
+        // Carry the todo's nested children (following indented lines) along.
+        const blockLen = 1 + collectDescendantLines(srcLines, srcIdx).length;
+        const block = srcLines.slice(srcIdx, srcIdx + blockLen);
+        srcLines.splice(srcIdx, blockLen);
 
         const tgtContent = await this.app.vault.read(targetFile);
         const tgtLines = tgtContent.split("\n");
         const insertIdx = insertBeforeLine ?? tgtLines.length;
-        tgtLines.splice(insertIdx, 0, todoLine);
+        tgtLines.splice(insertIdx, 0, ...block);
 
         const srcPath = todo.file.path;
         await this.app.vault.modify(todo.file, srcLines.join("\n"));
@@ -1062,11 +1089,10 @@ export default class ChecklistPlugin extends Plugin {
           const curTgt = (await this.app.vault.read(targetFile)).split("\n");
           const tgtIdx = curTgt.findIndex((l) => TODO_OPEN_PREFIX.test(l) && l.includes(todo.text));
           if (tgtIdx < 0) return;
-          const restored = curTgt[tgtIdx];
-          curTgt.splice(tgtIdx, 1);
+          curTgt.splice(tgtIdx, blockLen);
           await this.app.vault.modify(targetFile, curTgt.join("\n"));
           const curSrc = (await this.app.vault.read(todo.file)).split("\n");
-          curSrc.splice(srcIdx, 0, restored);
+          curSrc.splice(srcIdx, 0, ...block);
           await this.app.vault.modify(todo.file, curSrc.join("\n"));
         });
         const srcFile = this.app.vault.getAbstractFileByPath(srcPath);

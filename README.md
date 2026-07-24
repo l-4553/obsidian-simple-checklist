@@ -12,7 +12,7 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 - **Complete from the panel** — check off a todo; it gets marked `- [x]` in the file, with a small confetti burst
 - **Delete from the panel** — remove a todo from the file entirely using the trash icon
 - **Pin notes to the top** — pin a note group so it stays above the rest, regardless of sort order
-- **Drag and drop** — move a todo from one note into another by dragging it between groups
+- **Drag and drop** — move a todo from one note into another by dragging it between groups; its nested sub-todos are carried along
 - **Callout support** — todos written inside callouts (`> - [ ]`) are picked up too, with their callout header preserved
 - **Inline rendering** — wiki links (`[[Note]]`), Markdown links, and inline code (`` `code` ``) inside todo text are rendered inline
 - **Priority by `!`** — todos ending in `!` float to the top of their note, with `!!` above `!` above none
