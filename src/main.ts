@@ -102,6 +102,39 @@ function trailingBangs(text: string): number {
   return m ? m[0].length : 0;
 }
 
+// Reorder a note's todos (given in line order, each carrying its nesting `depth`)
+// so priority sorting happens per indentation level: siblings under the same
+// parent are ordered by trailing "!" (more first, ties keep written order), and
+// every item carries its nested descendants along with it. A "!" on a parent
+// only reorders it among its siblings — it never lifts a nested item across
+// levels, and never leaves that item's children behind.
+function sortTodosByPriority(items: TodoItem[]): TodoItem[] {
+  const order = (start: number, end: number): TodoItem[] => {
+    // Split items[start..end) into sibling groups: the first item is a parent,
+    // and every following item deeper than it is part of its subtree.
+    const groups: Array<{ item: TodoItem; children: TodoItem[] }> = [];
+    let i = start;
+    while (i < end) {
+      const base = items[i].depth ?? 0;
+      let j = i + 1;
+      while (j < end && (items[j].depth ?? 0) > base) j++;
+      groups.push({ item: items[i], children: order(i + 1, j) });
+      i = j;
+    }
+    // Sort siblings by trailing "!" (descending), keeping written order on ties.
+    const sorted = groups
+      .map((g, idx) => ({ g, idx }))
+      .sort((a, b) => {
+        const d = trailingBangs(b.g.item.text) - trailingBangs(a.g.item.text);
+        return d !== 0 ? d : a.idx - b.idx;
+      });
+    const out: TodoItem[] = [];
+    for (const { g } of sorted) out.push(g.item, ...g.children);
+    return out;
+  };
+  return order(0, items.length);
+}
+
 // Todo lines, with optional callout prefix(es): "  > > - [ ] text" matches.
 // TODO_OPEN_RE captures the trailing text; the *_PREFIX variants are tests only.
 const TODO_OPEN_RE = /^\s*(?:>\s*)*-\s\[ \]\s(.+)/;
@@ -862,22 +895,20 @@ export default class ChecklistPlugin extends Plugin {
       // todos in this file (in line order), so it mirrors the note structure
       // regardless of whether the note indents with tabs, 2 or 4 spaces.
       const stack: number[] = [];
+      const noteTodos: TodoItem[] = [];
       for (const item of items) {
         while (stack.length > 0 && stack[stack.length - 1] >= item.indent) stack.pop();
         const depth = stack.length;
         stack.push(item.indent);
         if (isExcludedByKeyword(item.text, excludeKeywords)) continue;
-        todos.push({ file, lineIndex: item.lineIndex, text: item.text, depth });
+        noteTodos.push({ file, lineIndex: item.lineIndex, text: item.text, depth });
       }
+      // Priority-sort within the note, per indentation level, keeping each
+      // item's nested children with it. The view groups by note path and
+      // orders the note groups itself, so todos only need to be contiguous and
+      // correctly ordered within their own note here.
+      todos.push(...sortTodosByPriority(noteTodos));
     }
-    todos.sort((a, b) => {
-      const c = compareNoteGroups(a.file, b.file, this.settings.sortMode);
-      if (c !== 0) return c;
-      // Within a note: more trailing "!" first (!! > ! > none), otherwise keep
-      // the order the items are written in the note.
-      const bangDiff = trailingBangs(b.text) - trailingBangs(a.text);
-      return bangDiff !== 0 ? bangDiff : a.lineIndex - b.lineIndex;
-    });
     return todos;
   }
 
