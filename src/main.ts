@@ -49,6 +49,7 @@ function compareNoteGroups(a: TFile, b: TFile, mode: SortMode): number {
 interface ChecklistSettings {
   sortMode: SortMode;
   dateNotesOnly: boolean;
+  hideFutureDateNotes: boolean;
   movePastTodosToToday: boolean;
   excludeKeywords: string;
   // Note paths pinned to the top of the panel, in pin order (most-recent last).
@@ -58,6 +59,7 @@ interface ChecklistSettings {
 const DEFAULT_SETTINGS: ChecklistSettings = {
   sortMode: "recent",
   dateNotesOnly: false,
+  hideFutureDateNotes: false,
   movePastTodosToToday: false,
   excludeKeywords: "",
   pinnedPaths: [],
@@ -846,12 +848,16 @@ export default class ChecklistPlugin extends Plugin {
 
   getAllTodos(): TodoItem[] {
     const todos: TodoItem[] = [];
-    const dateFilter = this.settings.dateNotesOnly ? this.getDateNotesFormat() : null;
+    // Resolve the date format once if any date-based filter is active.
+    const needsFormat = this.settings.dateNotesOnly || this.settings.hideFutureDateNotes;
+    const format = needsFormat ? this.getDateNotesFormat() : null;
     const excludeKeywords = parseExcludeKeywords(this.settings.excludeKeywords);
     for (const [path, items] of this.index) {
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
-      if (dateFilter !== null && !this.isDateNote(file, dateFilter)) continue;
+      if (this.settings.dateNotesOnly && format !== null && !this.isDateNote(file, format)) continue;
+      // Hide date notes dated after today (e.g. planning ahead in future daily notes).
+      if (this.settings.hideFutureDateNotes && format !== null && this.isFutureDateNote(file, format)) continue;
       // Derive each todo's nesting level from the relative indentation of the
       // todos in this file (in line order), so it mirrors the note structure
       // regardless of whether the note indents with tabs, 2 or 4 spaces.
@@ -878,6 +884,7 @@ export default class ChecklistPlugin extends Plugin {
   getEmptyMessage(): string {
     const hasFilters =
       this.settings.dateNotesOnly ||
+      this.settings.hideFutureDateNotes ||
       parseExcludeKeywords(this.settings.excludeKeywords).length > 0;
     return hasFilters ? "No open todos match the current filters." : "No open todos.";
   }
@@ -928,6 +935,13 @@ export default class ChecklistPlugin extends Plugin {
 
   private isDateNote(file: TFile, format: string): boolean {
     return typedMoment(file.basename, format, true).isValid();
+  }
+
+  // True only for notes whose filename is a valid date strictly after today.
+  // Non-date notes return false so they are never hidden by this filter.
+  private isFutureDateNote(file: TFile, format: string): boolean {
+    const parsed = typedMoment(file.basename, format, true);
+    return parsed.isValid() && parsed.isAfter(typedMoment(), "day");
   }
 
   private isTodayDateNote(file: TFile): boolean {
@@ -1283,6 +1297,17 @@ class ChecklistSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.dateNotesOnly).onChange(async (value) => {
           this.plugin.settings.dateNotesOnly = value;
+          await this.plugin.saveSettings();
+          this.plugin.applySettingsToViews();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("Hide future date notes")
+      .setDesc("Hide todos from date notes whose filename is a date after today, so planning-ahead notes stay out of the panel.")
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.hideFutureDateNotes).onChange(async (value) => {
+          this.plugin.settings.hideFutureDateNotes = value;
           await this.plugin.saveSettings();
           this.plugin.applySettingsToViews();
         })
