@@ -346,6 +346,17 @@ function collectEmptyCalloutRemovals(lines: string[], removedTodoIndices: number
   return extra;
 }
 
+// Daily note formats may contain "/" (e.g. "YYYY/MM/YYYY-MM-DD"), which the
+// Daily Notes plugin turns into subfolders. Match the format against as many
+// trailing path segments as it has, not just the basename. Slashes inside
+// moment's [escaped] literals don't count as separators.
+function parseDateNote(file: TFile, format: string): moment.Moment {
+  const segments = format.replace(/\[[^\]]*\]/g, "").split("/").length;
+  const name = file.path.slice(0, file.path.length - file.extension.length - 1);
+  const tail = name.split("/").slice(-segments).join("/");
+  return typedMoment(tail, format, true);
+}
+
 // Minimal shape of the Daily Notes core plugin we touch. The internalPlugins
 // container isn't in Obsidian's public type definitions, so we declare just
 // enough to safely read the format setting.
@@ -1121,6 +1132,11 @@ export default class ChecklistPlugin extends Plugin {
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) return existing;
     try {
+      // Formats like "YYYY/MM/YYYY-MM-DD" put the note in subfolders that may not exist yet.
+      const parent = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+      if (parent && !this.app.vault.getAbstractFileByPath(parent)) {
+        await this.app.vault.createFolder(parent);
+      }
       return await this.app.vault.create(path, "");
     } catch {
       return null;
@@ -1141,19 +1157,19 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   private isDateNote(file: TFile, format: string): boolean {
-    return typedMoment(file.basename, format, true).isValid();
+    return parseDateNote(file, format).isValid();
   }
 
   // True only for notes whose filename is a valid date strictly after today.
   // Non-date notes return false so they are never hidden by this filter.
   private isFutureDateNote(file: TFile, format: string): boolean {
-    const parsed = typedMoment(file.basename, format, true);
+    const parsed = parseDateNote(file, format);
     return parsed.isValid() && parsed.isAfter(typedMoment(), "day");
   }
 
   private isTodayDateNote(file: TFile): boolean {
     const format = this.getDateNotesFormat();
-    const parsed = typedMoment(file.basename, format, true);
+    const parsed = parseDateNote(file, format);
     return parsed.isValid() && parsed.isSame(typedMoment(), "day");
   }
 
@@ -1352,7 +1368,7 @@ export default class ChecklistPlugin extends Plugin {
       if (path === todayNote.path) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
-      const noteDate = typedMoment(file.basename, format, true);
+      const noteDate = parseDateNote(file, format);
       if (!noteDate.isValid() || !noteDate.isBefore(today)) continue;
 
       const content = await this.app.vault.cachedRead(file);
