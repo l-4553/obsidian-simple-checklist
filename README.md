@@ -27,7 +27,7 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 
 ### Filters
 
-- **Date notes only** — show todos only from notes whose filename matches your Daily Notes date format
+- **Date notes only** — show todos only from notes whose filename matches your Daily Notes date format (formats with folders, e.g. `YYYY/MM/YYYY-MM-DD`, are supported)
 - **Hide future date notes** — hide todos from date notes dated after today, so planning-ahead notes stay out of the panel
 - **Exclude todos** — hide todos from the panel, one rule per line; the shape of a line decides what it matches:
 
