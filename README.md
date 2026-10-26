@@ -36,7 +36,7 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
   | `define` | todos containing the word (case-insensitive) |
   | `Templates/` | every note in the folder and its subfolders |
   | `Projects/Games backlog.md` | that note |
-  | `/weekly planner/` | notes whose path matches the regular expression (case-insensitive); invalid ones are flagged in the settings and ignored |
+  | `/weekly planner/` | notes whose path matches the regular expression (case-insensitive); an invalid one is flagged in the settings and the box isn't saved until it's fixed |
 
 ### Daily notes
 
