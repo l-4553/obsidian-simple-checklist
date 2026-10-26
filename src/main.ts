@@ -78,6 +78,13 @@ interface DragTodoPayload {
 
 const DRAG_MIME = "application/x-checklist-todo";
 
+// Drop position for moveTodo: next to `todo`, before it or after its nested
+// children. The moved todo takes `todo`'s indentation.
+interface DropAnchor {
+  todo: TodoItem;
+  after: boolean;
+}
+
 function isDragTodoPayload(value: unknown): value is DragTodoPayload {
   if (typeof value !== "object" || value === null) return false;
   const payload = value as Record<string, unknown>;
@@ -209,6 +216,26 @@ function blockquoteDepth(prefix: string): number {
   return (prefix.match(/>/g) ?? []).length;
 }
 
+// Splits a line into its blockquote/callout marker ("> ", "> > ") and the
+// list indentation that follows it.
+function splitListIndent(line: string): { quote: string; indent: string } {
+  const quote = /^(?:\s*>)+\s?/.exec(line)?.[0] ?? "";
+  const indent = /^[\t ]*/.exec(line.slice(quote.length))?.[0] ?? "";
+  return { quote, indent };
+}
+
+// Re-indents a moved block (a todo and its nested lines) so the todo uses
+// `indent`; nested lines shift by the same amount and keep their structure.
+function reindentBlock(block: string[], indent: string): string[] {
+  const old = splitListIndent(block[0]).indent;
+  if (old === indent) return block;
+  return block.map((line) => {
+    const { quote } = splitListIndent(line);
+    const rest = line.slice(quote.length);
+    return rest.startsWith(old) ? quote + indent + rest.slice(old.length) : line;
+  });
+}
+
 // Given a todo line's index, return the indices of the lines directly nested
 // underneath it — the contiguous run of following lines that are more deeply
 // indented, within the same blockquote context. These are the todo's child
@@ -334,8 +361,30 @@ interface AppWithInternalPlugins {
 }
 
 // Matches [[target]], [[target|alias]], [[target#heading]], [[target#heading|alias]],
-// markdown links [label](target), bare http(s) URLs, and inline code `code`.
-const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s)<>]+)|`([^`]+)`/g;
+// the "[label](" start of markdown links, bare http(s) URLs, and inline code `code`.
+// Markdown link labels may contain one level of nested brackets; the link target
+// is found by findLinkTargetEnd so parentheses inside URLs are counted.
+// Bare URLs may contain balanced parentheses ("…/Foo_(bar)") but don't swallow
+// a closing ")" around them ("(see https://x.y)").
+const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[((?:[^[\]]|\[[^[\]]*\])+)\]\(|(https?:\/\/(?:[^\s()<>]|\([^\s()<>]*\))+)|`([^`]+)`/g;
+
+// Index of the ")" that closes a markdown link target starting at `start` (just
+// after its "("), counting nested parentheses so URLs like "…?q=(a)&id=1" stay
+// intact. Backslash-escaped characters don't count. Returns -1 if never closed.
+function findLinkTargetEnd(text: string, start: number): number {
+  let depth = 1;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\") {
+      i++;
+    } else if (ch === "(") {
+      depth++;
+    } else if (ch === ")" && --depth === 0) {
+      return i;
+    }
+  }
+  return -1;
+}
 
 // External URL = anything with a scheme (http:, https:, mailto:, ftp:, obsidian:, …).
 // Vault-relative targets like "Notes/foo" or "#heading" don't match.
@@ -361,6 +410,7 @@ function renderTodoText(
   let m: RegExpExecArray | null;
   while ((m = LINK_RE.exec(text)) !== null) {
     if (m.index > last) container.appendText(text.slice(last, m.index));
+    let end = m.index + m[0].length;
     if (m[1] !== undefined) {
       const target = m[1].trim();
       const heading = m[2]?.trim() ?? "";
@@ -369,21 +419,32 @@ function renderTodoText(
       const link = container.createEl("a", { cls: "checklist-inline-link", text: label });
       link.addEventListener("click", (e) => { e.stopPropagation(); openLink(target, subpath, sourcePath); });
     } else if (m[4] !== undefined) {
+      const close = findLinkTargetEnd(text, end);
+      if (close === -1 || close === end) {
+        // Unclosed or empty "[label](": keep the "[" as text and rescan right after it,
+        // so links and URLs in the rest of the text are still rendered.
+        container.appendText("[");
+        last = m.index + 1;
+        LINK_RE.lastIndex = last;
+        continue;
+      }
       const label = m[4];
-      const target = m[5];
+      const target = text.slice(end, close).replace(/\\([()])/g, "$1");
+      end = close + 1;
+      LINK_RE.lastIndex = end;
       if (isExternalUrl(target)) {
         createExternalLink(container, label, target);
       } else {
         const link = container.createEl("a", { cls: "checklist-inline-link", text: label });
         link.addEventListener("click", (e) => { e.stopPropagation(); openLink(target, "", sourcePath); });
       }
-    } else if (m[6] !== undefined) {
-      const url = m[6];
+    } else if (m[5] !== undefined) {
+      const url = m[5];
       createExternalLink(container, url, url);
     } else {
-      container.createEl("code", { cls: "checklist-inline-code", text: m[7] });
+      container.createEl("code", { cls: "checklist-inline-code", text: m[6] });
     }
-    last = m.index + m[0].length;
+    last = end;
   }
   if (last < text.length) container.appendText(text.slice(last));
 }
@@ -436,6 +497,9 @@ class ChecklistView extends ItemView {
   private emptyEl: HTMLElement | null = null;
   private rowEls = new Map<string, HTMLElement>();   // itemKey -> row
   private groupEls = new Map<string, { group: HTMLElement; title: HTMLElement }>();
+  // Current todo behind each row, refreshed on every reconcile so drops use fresh line indices.
+  private rowTodos = new WeakMap<HTMLElement, TodoItem>();
+  private dropIndicatorRow: HTMLElement | null = null;
   // Stable display order — only updated on first load or when new file paths appear
   private displayOrder: string[] = [];
   private titleToggleEl: HTMLElement | null = null;
@@ -660,6 +724,7 @@ class ChecklistView extends ItemView {
         }
         // Set on every reconcile so re-indenting a todo in the note updates the row.
         row.style.setProperty("--checklist-depth", String(todo.depth ?? 0));
+        this.rowTodos.set(row, todo);
         groupData.group.appendChild(row);
       }
     }
@@ -682,30 +747,83 @@ class ChecklistView extends ItemView {
     return { file, lineIndex: payload.lineIndex, text: payload.text };
   }
 
+  // Where a drop over `groupEl` lands: before or after one of its rows, picked
+  // by which half of the row the pointer is over. Over the group header or
+  // empty space it means after the last row. "After" a row is normalised to
+  // "before the next row" so the indicator line and the insert position match
+  // even when the next row is a nested child. Returns null when the drop would
+  // leave the dragged todo where it is.
+  private getDropTarget(groupEl: HTMLElement, e: DragEvent): { row: HTMLElement; after: boolean } | null {
+    const rows = Array.from(groupEl.querySelectorAll<HTMLElement>(":scope > .checklist-item"));
+    if (rows.length === 0) return null;
+    const node = e.targetNode;
+    const over = node?.instanceOf(HTMLElement) ? node.closest<HTMLElement>(".checklist-item") : null;
+    let index = over ? rows.indexOf(over) : -1;
+    let after = true;
+    if (index < 0) {
+      index = rows.length - 1;
+    } else {
+      const rect = rows[index].getBoundingClientRect();
+      after = e.clientY > rect.top + rect.height / 2;
+    }
+    if (after && index + 1 < rows.length) {
+      index++;
+      after = false;
+    }
+
+    // Same note: dropping onto the dragged todo itself or inside its nested
+    // children does nothing. Right after its children it only matters if the
+    // todo would be re-indented (it takes the indentation of the next row).
+    const dragged = rows.findIndex((r) => r.classList.contains("checklist-item-dragging"));
+    if (dragged >= 0) {
+      const depthOf = (i: number) => this.rowTodos.get(rows[i])?.depth ?? 0;
+      let blockEnd = dragged + 1;
+      while (blockEnd < rows.length && depthOf(blockEnd) > depthOf(dragged)) blockEnd++;
+      const insertAt = after ? rows.length : index;
+      if (insertAt >= dragged && insertAt < blockEnd) return null;
+      if (insertAt === blockEnd && (after || depthOf(index) === depthOf(dragged))) return null;
+    }
+    return { row: rows[index], after };
+  }
+
+  // Shows the drop position as an accent line on the row's top or bottom edge
+  // (drawn with a pseudo-element, so nothing shifts). null hides it.
+  private showDropIndicator(target: { row: HTMLElement; after: boolean } | null): void {
+    if (this.dropIndicatorRow && this.dropIndicatorRow !== target?.row) {
+      this.dropIndicatorRow.classList.remove("checklist-drop-before", "checklist-drop-after");
+    }
+    this.dropIndicatorRow = target?.row ?? null;
+    if (target) {
+      target.row.classList.toggle("checklist-drop-before", !target.after);
+      target.row.classList.toggle("checklist-drop-after", target.after);
+    }
+  }
+
   private setupGroupDrop(groupEl: HTMLElement, targetFile: TFile): void {
     groupEl.addEventListener("dragover", (e: DragEvent) => {
       if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
       if (!this.canDropInto(targetFile.path)) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
-      groupEl.classList.add("checklist-group-drag-over");
+      this.showDropIndicator(this.getDropTarget(groupEl, e));
     });
     groupEl.addEventListener("dragleave", (e: DragEvent) => {
-      if (!groupEl.contains(e.relatedTarget as Node)) {
-        groupEl.classList.remove("checklist-group-drag-over");
-      }
+      if (!groupEl.contains(e.relatedTarget as Node)) this.showDropIndicator(null);
     });
     groupEl.addEventListener("drop", (e: DragEvent) => {
-      groupEl.classList.remove("checklist-group-drag-over");
+      const target = this.getDropTarget(groupEl, e);
+      this.showDropIndicator(null);
       const payload = this.parseDragPayload(e);
-      if (!payload || payload.sourcePath === targetFile.path) return;
-      if (this.plugin.settings.hideNoteTitles) return;
+      if (!payload) return;
+      // Without note titles, a todo may only be reordered within its own note.
+      if (this.plugin.settings.hideNoteTitles && payload.sourcePath !== targetFile.path) return;
       e.preventDefault();
       e.stopPropagation();
       const todo = this.payloadToTodo(payload);
-      if (!todo) return;
+      const anchor = target ? this.rowTodos.get(target.row) : undefined;
+      if (!todo || !target || !anchor) return;
       this.plugin.suppressRefresh = true;
-      void this.plugin.moveTodo(todo, targetFile).then(() => {
+      void this.plugin.moveTodo(todo, targetFile, { todo: anchor, after: target.after }).then(() => {
         this.plugin.suppressRefresh = false;
         this.plugin.refreshView();
       });
@@ -784,41 +902,7 @@ class ChecklistView extends ItemView {
     row.addEventListener("dragend", () => {
       row.classList.remove("checklist-item-dragging");
       this.dragSourcePath = null;
-      this.wrapper?.querySelectorAll(".checklist-group-drag-over").forEach((el) => {
-        if (el.instanceOf(HTMLElement)) el.classList.remove("checklist-group-drag-over");
-      });
-      this.wrapper?.querySelectorAll(".checklist-item-drag-over").forEach((el) => {
-        if (el.instanceOf(HTMLElement)) el.classList.remove("checklist-item-drag-over");
-      });
-    });
-    row.addEventListener("dragover", (e: DragEvent) => {
-      if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
-      if (!this.canDropInto(todo.file.path)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      e.dataTransfer.dropEffect = "move";
-      row.classList.add("checklist-item-drag-over");
-    });
-    row.addEventListener("dragleave", () => {
-      row.classList.remove("checklist-item-drag-over");
-    });
-    row.addEventListener("drop", (e: DragEvent) => {
-      row.classList.remove("checklist-item-drag-over");
-      const payload = this.parseDragPayload(e);
-      if (!payload) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const sourceTodo = this.payloadToTodo(payload);
-      if (!sourceTodo) return;
-      if (this.plugin.settings.hideNoteTitles && sourceTodo.file.path !== todo.file.path) return;
-      if (sourceTodo.file.path === todo.file.path && sourceTodo.text === todo.text && payload.occurrence === occurrence) {
-        return;
-      }
-      this.plugin.suppressRefresh = true;
-      void this.plugin.moveTodo(sourceTodo, todo.file, todo.lineIndex).then(() => {
-        this.plugin.suppressRefresh = false;
-        this.plugin.refreshView();
-      });
+      this.showDropIndicator(null);
     });
 
     return row;
@@ -1181,25 +1265,41 @@ export default class ChecklistPlugin extends Plugin {
     });
   }
 
-  async moveTodo(todo: TodoItem, targetFile: TFile, insertBeforeLine?: number): Promise<void> {
+  // Where a todo dropped next to `anchor` goes: before the anchor's own line,
+  // or (after) the line following its nested children, indented like the
+  // anchor. Without an anchor, or if it can't be found, the end of the note
+  // with the todo's indentation unchanged (indent null).
+  private resolveDrop(lines: string[], anchor?: DropAnchor): { line: number; indent: string | null } {
+    if (!anchor) return { line: lines.length, indent: null };
+    const idx = this.findTodoLine(lines, anchor.todo);
+    if (idx < 0) return { line: lines.length, indent: null };
+    const line = anchor.after ? idx + 1 + collectDescendantLines(lines, idx).length : idx;
+    return { line, indent: splitListIndent(lines[idx]).indent };
+  }
+
+  async moveTodo(todo: TodoItem, targetFile: TFile, anchor?: DropAnchor): Promise<void> {
     return this.enqueue(async () => {
-      if (todo.file.path === targetFile.path && insertBeforeLine === undefined) return;
+      if (todo.file.path === targetFile.path && anchor === undefined) return;
 
       if (todo.file.path === targetFile.path) {
         const content = await this.app.vault.read(todo.file);
         const lines = content.split("\n");
         const srcIdx = this.findTodoLine(lines, todo);
         if (srcIdx < 0) return;
+        const drop = this.resolveDrop(lines, anchor);
+        const insertBeforeLine = drop.line;
         // Move the todo together with its nested children (indented lines that
         // follow it), so dragging a parent keeps its sub-items attached.
         const blockLen = 1 + collectDescendantLines(lines, srcIdx).length;
         // Dropping onto the todo itself or one of its own children is a no-op.
         if (insertBeforeLine !== undefined && insertBeforeLine > srcIdx && insertBeforeLine < srcIdx + blockLen) return;
-        const block = lines.slice(srcIdx, srcIdx + blockLen);
+        const original = lines.slice(srcIdx, srcIdx + blockLen);
+        const block = drop.indent === null ? original : reindentBlock(original, drop.indent);
         lines.splice(srcIdx, blockLen);
-        let insertIdx = insertBeforeLine ?? lines.length;
+        let insertIdx = insertBeforeLine;
         if (srcIdx < insertIdx) insertIdx -= blockLen;
-        if (insertIdx === srcIdx) return;
+        // Same place and same indentation: nothing to do.
+        if (insertIdx === srcIdx && block.every((l, i) => l === original[i])) return;
         lines.splice(insertIdx, 0, ...block);
         await this.app.vault.modify(todo.file, lines.join("\n"));
         this.lastModifiedFile = todo.file;
@@ -1215,8 +1315,8 @@ export default class ChecklistPlugin extends Plugin {
 
         const tgtContent = await this.app.vault.read(targetFile);
         const tgtLines = tgtContent.split("\n");
-        const insertIdx = insertBeforeLine ?? tgtLines.length;
-        tgtLines.splice(insertIdx, 0, ...block);
+        const drop = this.resolveDrop(tgtLines, anchor);
+        tgtLines.splice(drop.line, 0, ...(drop.indent === null ? block : reindentBlock(block, drop.indent)));
 
         const srcPath = todo.file.path;
         await this.app.vault.modify(todo.file, srcLines.join("\n"));
