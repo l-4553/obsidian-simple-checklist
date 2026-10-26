@@ -54,6 +54,8 @@ interface ChecklistSettings {
   excludeKeywords: string;
   // Folders or notes (one vault path per line) whose todos are hidden.
   excludePaths: string;
+  // Regular expressions (one per line) matched against note paths; matching notes' todos are hidden.
+  excludePatterns: string;
   // Note paths pinned to the top of the panel, in pin order (most-recent last).
   pinnedPaths: string[];
 }
@@ -65,6 +67,7 @@ const DEFAULT_SETTINGS: ChecklistSettings = {
   movePastTodosToToday: false,
   excludeKeywords: "",
   excludePaths: "",
+  excludePatterns: "",
   pinnedPaths: [],
 };
 
@@ -113,6 +116,21 @@ function isExcludedByPath(filePath: string, paths: string[]): boolean {
   if (paths.length === 0) return false;
   const lower = filePath.toLowerCase();
   return paths.some((p) => lower === p || lower === `${p}.md` || lower.startsWith(`${p}/`));
+}
+
+// One regular expression per line, case-insensitive. Lines that aren't valid
+// regexes are skipped and returned in `invalid` so the settings can flag them.
+function parseExcludePatterns(raw: string): { patterns: RegExp[]; invalid: string[] } {
+  const patterns: RegExp[] = [];
+  const invalid: string[] = [];
+  for (const line of raw.split("\n").map((l) => l.trim()).filter((l) => l.length > 0)) {
+    try {
+      patterns.push(new RegExp(line, "i"));
+    } catch {
+      invalid.push(line);
+    }
+  }
+  return { patterns, invalid };
 }
 
 // Priority marker: count the trailing "!" of an item so "!!" ranks above "!"
@@ -906,8 +924,10 @@ export default class ChecklistPlugin extends Plugin {
     const format = needsFormat ? this.getDateNotesFormat() : null;
     const excludeKeywords = parseExcludeKeywords(this.settings.excludeKeywords);
     const excludePaths = parseExcludePaths(this.settings.excludePaths);
+    const excludePatterns = parseExcludePatterns(this.settings.excludePatterns).patterns;
     for (const [path, items] of this.index) {
       if (isExcludedByPath(path, excludePaths)) continue;
+      if (excludePatterns.some((re) => re.test(path))) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
       if (this.settings.dateNotesOnly && format !== null && !this.isDateNote(file, format)) continue;
@@ -939,7 +959,8 @@ export default class ChecklistPlugin extends Plugin {
       this.settings.dateNotesOnly ||
       this.settings.hideFutureDateNotes ||
       parseExcludeKeywords(this.settings.excludeKeywords).length > 0 ||
-      parseExcludePaths(this.settings.excludePaths).length > 0;
+      parseExcludePaths(this.settings.excludePaths).length > 0 ||
+      parseExcludePatterns(this.settings.excludePatterns).patterns.length > 0;
     return hasFilters ? "No open todos match the current filters." : "No open todos.";
   }
 
@@ -1368,34 +1389,6 @@ class ChecklistSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
-      .setName("Exclude keywords")
-      .setDesc("Comma-separated words. Todos containing any keyword are hidden from the panel (case-insensitive).")
-      .addText((text) =>
-        text
-          .setPlaceholder("define, ai, TODO")
-          .setValue(this.plugin.settings.excludeKeywords)
-          .onChange(async (value) => {
-            this.plugin.settings.excludeKeywords = value;
-            await this.plugin.saveSettings();
-            this.plugin.applySettingsToViews();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Exclude folders and notes")
-      .setDesc("One path per line. Todos from these folders (including subfolders) or notes are hidden from the panel.")
-      .addTextArea((text) =>
-        text
-          .setPlaceholder("Templates\nArchive/Old projects")
-          .setValue(this.plugin.settings.excludePaths)
-          .onChange(async (value) => {
-            this.plugin.settings.excludePaths = value;
-            await this.plugin.saveSettings();
-            this.plugin.applySettingsToViews();
-          })
-      );
-
-    new Setting(containerEl)
       .setName("Roll over open todos")
       .setDesc(
         "When today's daily note is created (e.g. via the Daily Notes shortcut), or when this " +
@@ -1409,5 +1402,65 @@ class ChecklistSettingTab extends PluginSettingTab {
           if (value) await this.plugin.runRollOverToToday();
         })
       );
+
+    // ── Exclude todos: hide todos by text, by note, or by note path pattern ──
+    new Setting(containerEl).setName("Exclude todos").setHeading();
+
+    new Setting(containerEl)
+      .setName("Keywords")
+      .setDesc("Comma-separated words. Todos containing any keyword are hidden from the panel (case-insensitive).")
+      .addText((text) =>
+        text
+          .setPlaceholder("define, ai, TODO")
+          .setValue(this.plugin.settings.excludeKeywords)
+          .onChange(async (value) => {
+            this.plugin.settings.excludeKeywords = value;
+            await this.plugin.saveSettings();
+            this.plugin.applySettingsToViews();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Folders and notes")
+      .setDesc("One path per line. Todos from these folders (including subfolders) or notes are hidden from the panel.")
+      .addTextArea((text) =>
+        text
+          .setPlaceholder("Templates\nArchive/Old projects")
+          .setValue(this.plugin.settings.excludePaths)
+          .onChange(async (value) => {
+            this.plugin.settings.excludePaths = value;
+            await this.plugin.saveSettings();
+            this.plugin.applySettingsToViews();
+          })
+      );
+
+    const patternsSetting = new Setting(containerEl)
+      .setName("Path patterns")
+      .addTextArea((text) =>
+        text
+          .setPlaceholder("^Templates/\nweekly planner\n\\.excalidraw\\.md$")
+          .setValue(this.plugin.settings.excludePatterns)
+          .onChange(async (value) => {
+            this.plugin.settings.excludePatterns = value;
+            showPatternErrors(value);
+            await this.plugin.saveSettings();
+            this.plugin.applySettingsToViews();
+          })
+      );
+    const showPatternErrors = (raw: string): void => {
+      const { invalid } = parseExcludePatterns(raw);
+      patternsSetting.descEl.empty();
+      patternsSetting.descEl.appendText(
+        "One regular expression per line, matched against each note's path (e.g. \"Templates/Weekly.md\", " +
+          "case-insensitive). Todos from matching notes are hidden from the panel."
+      );
+      if (invalid.length > 0) {
+        patternsSetting.descEl.createDiv({
+          cls: "mod-warning",
+          text: `Invalid, ignored: ${invalid.join(", ")}`,
+        });
+      }
+    };
+    showPatternErrors(this.plugin.settings.excludePatterns);
   }
 }
