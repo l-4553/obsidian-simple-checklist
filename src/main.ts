@@ -48,6 +48,8 @@ function compareNoteGroups(a: TFile, b: TFile, mode: SortMode): number {
 
 interface ChecklistSettings {
   sortMode: SortMode;
+  // Show only the todos, without note titles and dividers ("bare" mode).
+  hideNoteTitles: boolean;
   dateNotesOnly: boolean;
   hideFutureDateNotes: boolean;
   movePastTodosToToday: boolean;
@@ -59,6 +61,7 @@ interface ChecklistSettings {
 
 const DEFAULT_SETTINGS: ChecklistSettings = {
   sortMode: "recent",
+  hideNoteTitles: false,
   dateNotesOnly: false,
   hideFutureDateNotes: false,
   movePastTodosToToday: false,
@@ -499,12 +502,29 @@ class ChecklistView extends ItemView {
   private dropIndicatorRow: HTMLElement | null = null;
   // Stable display order — only updated on first load or when new file paths appear
   private displayOrder: string[] = [];
+  private titleToggleEl: HTMLElement | null = null;
+  // Note of the todo being dragged from this view. dataTransfer contents can't be
+  // read during dragover, so this decides whether a drop target is allowed.
+  private dragSourcePath: string | null = null;
 
   // Called by the plugin when settings change — resets the stable order so
   // the new sort/filter takes effect on the next render.
   applySettings(): void {
     this.displayOrder = [];
     this.render();
+  }
+
+  // Without note titles, todos can only be reordered within their own note:
+  // dropping must never move a todo into a different note.
+  private canDropInto(filePath: string): boolean {
+    return !this.plugin.settings.hideNoteTitles || this.dragSourcePath === filePath;
+  }
+
+  private updateTitleToggle(): void {
+    if (!this.titleToggleEl) return;
+    const hidden = this.plugin.settings.hideNoteTitles;
+    setIcon(this.titleToggleEl, hidden ? "heading" : "list");
+    this.titleToggleEl.setAttr("aria-label", hidden ? "Show note titles" : "Hide note titles");
   }
 
   constructor(leaf: WorkspaceLeaf, plugin: ChecklistPlugin) {
@@ -516,6 +536,9 @@ class ChecklistView extends ItemView {
   getDisplayText(): string { return "Checklist"; }
   getIcon(): string { return "check-square"; }
   onOpen(): Promise<void> {
+    this.titleToggleEl = this.addAction("list", "Hide note titles", () => {
+      void this.plugin.setHideNoteTitles(!this.plugin.settings.hideNoteTitles);
+    });
     this.render();
     // Forward Cmd/Ctrl+Z to the last-modified editor, or our own undo stack if file isn't open
     this.containerEl.addEventListener("keydown", (e) => {
@@ -563,6 +586,7 @@ class ChecklistView extends ItemView {
         this.groupEls.clear();
         this.displayOrder = [];
       }
+      this.updateTitleToggle();
       const emptyText = this.plugin.getEmptyMessage();
       if (!this.emptyEl) {
         this.emptyEl = container.createDiv({ cls: "checklist-empty", text: emptyText });
@@ -575,6 +599,8 @@ class ChecklistView extends ItemView {
     if (!this.wrapper) {
       this.wrapper = container.createDiv({ cls: "checklist-container" });
     }
+    this.wrapper.classList.toggle("is-bare", this.plugin.settings.hideNoteTitles);
+    this.updateTitleToggle();
 
     // ── Build grouped items ───────────────────────────────────────────────────
     const grouped = new Map<string, TodoItem[]>();
@@ -776,6 +802,7 @@ class ChecklistView extends ItemView {
   private setupGroupDrop(groupEl: HTMLElement, targetFile: TFile): void {
     groupEl.addEventListener("dragover", (e: DragEvent) => {
       if (!e.dataTransfer?.types.includes(DRAG_MIME)) return;
+      if (!this.canDropInto(targetFile.path)) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = "move";
       this.showDropIndicator(this.getDropTarget(groupEl, e));
@@ -788,6 +815,8 @@ class ChecklistView extends ItemView {
       this.showDropIndicator(null);
       const payload = this.parseDragPayload(e);
       if (!payload) return;
+      // Without note titles, a todo may only be reordered within its own note.
+      if (this.plugin.settings.hideNoteTitles && payload.sourcePath !== targetFile.path) return;
       e.preventDefault();
       e.stopPropagation();
       const todo = this.payloadToTodo(payload);
@@ -868,9 +897,11 @@ class ChecklistView extends ItemView {
       );
       if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
       row.classList.add("checklist-item-dragging");
+      this.dragSourcePath = todo.file.path;
     });
     row.addEventListener("dragend", () => {
       row.classList.remove("checklist-item-dragging");
+      this.dragSourcePath = null;
       this.showDropIndicator(null);
     });
 
@@ -918,6 +949,11 @@ export default class ChecklistPlugin extends Plugin {
     this.registerView(VIEW_TYPE, (leaf) => new ChecklistView(leaf, this));
     this.addRibbonIcon("check-square", "Open Checklist", () => { void this.activateView(); });
     this.addCommand({ id: "open-checklist", name: "Open Checklist panel", callback: () => { void this.activateView(); } });
+    this.addCommand({
+      id: "toggle-note-titles",
+      name: "Toggle note titles in Checklist panel",
+      callback: () => { void this.setHideNoteTitles(!this.settings.hideNoteTitles); },
+    });
     this.addSettingTab(new ChecklistSettingTab(this.app, this));
 
     this.app.workspace.onLayoutReady(async () => {
@@ -1428,6 +1464,13 @@ export default class ChecklistPlugin extends Plugin {
     });
   }
 
+  // Display-only change: re-render without resetting the note order.
+  async setHideNoteTitles(value: boolean): Promise<void> {
+    this.settings.hideNoteTitles = value;
+    await this.saveSettings();
+    this.refreshView();
+  }
+
   // Called by the settings tab after sort/filter changes so views drop their
   // stable display order and rebuild with the new settings applied.
   applySettingsToViews(): void {
@@ -1459,11 +1502,12 @@ class ChecklistSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
+    // ── Display: how the panel looks ──────────────────────────────────────────
+    new Setting(containerEl).setName("Display").setHeading();
+
     new Setting(containerEl)
       .setName("Note sort order")
-      .setDesc(
-        "How note groups are ordered in the panel. Todos within each note keep their order in the file."
-      )
+      .setDesc("How note groups are ordered in the panel. Todos within each note keep their order in the file.")
       .addDropdown((dropdown) =>
         dropdown
           .addOption("recent", "Recently modified note first")
@@ -1477,6 +1521,21 @@ class ChecklistSettingTab extends PluginSettingTab {
             this.plugin.applySettingsToViews();
           })
       );
+
+    new Setting(containerEl)
+      .setName("Hide note titles")
+      .setDesc(
+        "Show only the todos, without note titles. Dragging then only reorders todos within their own note. " +
+          "Also available as a button in the panel header."
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.hideNoteTitles).onChange(async (value) => {
+          await this.plugin.setHideNoteTitles(value);
+        })
+      );
+
+    // ── Filters: which todos are shown ────────────────────────────────────────
+    new Setting(containerEl).setName("Filters").setHeading();
 
     new Setting(containerEl)
       .setName("Date notes only")
@@ -1497,21 +1556,6 @@ class ChecklistSettingTab extends PluginSettingTab {
           this.plugin.settings.hideFutureDateNotes = value;
           await this.plugin.saveSettings();
           this.plugin.applySettingsToViews();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Roll over open todos")
-      .setDesc(
-        "When today's daily note is created (e.g. via the Daily Notes shortcut), or when this " +
-          "setting is turned on, move open todos from past daily notes into it. Callout headers " +
-          "are copied with todos inside callouts. Past notes are detected using your Daily Notes date format."
-      )
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.movePastTodosToToday).onChange(async (value) => {
-          this.plugin.settings.movePastTodosToToday = value;
-          await this.plugin.saveSettings();
-          if (value) await this.plugin.runRollOverToToday();
         })
       );
 
@@ -1545,5 +1589,23 @@ class ChecklistSettingTab extends PluginSettingTab {
       }
     };
     showExcludeHelp(this.plugin.settings.excludeRules);
+
+    // ── Daily notes: changes made to your notes ───────────────────────────────
+    new Setting(containerEl).setName("Daily notes").setHeading();
+
+    new Setting(containerEl)
+      .setName("Roll over open todos")
+      .setDesc(
+        "When today's daily note is created (e.g. via the Daily Notes shortcut), or when this " +
+          "setting is turned on, move open todos from past daily notes into it. Callout headers " +
+          "are copied with todos inside callouts. Past notes are detected using your Daily Notes date format."
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.movePastTodosToToday).onChange(async (value) => {
+          this.plugin.settings.movePastTodosToToday = value;
+          await this.plugin.saveSettings();
+          if (value) await this.plugin.runRollOverToToday();
+        })
+      );
   }
 }

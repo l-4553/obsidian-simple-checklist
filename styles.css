@@ -67,6 +67,16 @@
   margin: 6px 12px 4px;
 }
 
+/* "Hide note titles" mode: only the todos, no note headers or dividers. */
+.checklist-container.is-bare .checklist-group-header,
+.checklist-container.is-bare .checklist-divider {
+  display: none;
+}
+
+.checklist-container.is-bare .checklist-group {
+  margin-bottom: 0;
+}
+
 .checklist-item {
   display: flex;
   align-items: flex-start;
