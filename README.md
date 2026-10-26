@@ -20,10 +20,19 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 
 ## Settings
 
+### Display
+
 - **Note sort order** — order groups by most/least recently modified, or note name (A–Z / Z–A)
+- **Hide note titles** — show only the todos, without note titles; dragging then only reorders todos within their own note. Also toggled from the panel header button or the **Toggle note titles in Checklist panel** command
+
+### Filters
+
 - **Date notes only** — show todos only from notes whose filename matches your Daily Notes date format
 - **Hide future date notes** — hide todos from date notes dated after today, so planning-ahead notes stay out of the panel
 - **Exclude keywords** — hide todos containing any of the given comma-separated keywords (case-insensitive)
+
+### Daily notes
+
 - **Roll over open todos** — when today's daily note is created, move open todos from past daily notes into it (callout headers are carried along)
 
 ## Usage
