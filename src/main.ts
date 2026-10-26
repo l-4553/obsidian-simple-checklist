@@ -52,6 +52,8 @@ interface ChecklistSettings {
   hideFutureDateNotes: boolean;
   movePastTodosToToday: boolean;
   excludeKeywords: string;
+  // Folders or notes (one vault path per line) whose todos are hidden.
+  excludePaths: string;
   // Note paths pinned to the top of the panel, in pin order (most-recent last).
   pinnedPaths: string[];
 }
@@ -62,6 +64,7 @@ const DEFAULT_SETTINGS: ChecklistSettings = {
   hideFutureDateNotes: false,
   movePastTodosToToday: false,
   excludeKeywords: "",
+  excludePaths: "",
   pinnedPaths: [],
 };
 
@@ -93,6 +96,23 @@ function isExcludedByKeyword(text: string, keywords: string[]): boolean {
   if (keywords.length === 0) return false;
   const lower = text.toLowerCase();
   return keywords.some((k) => lower.includes(k.toLowerCase()));
+}
+
+// One vault path per line; surrounding slashes are dropped so "Templates/" and
+// "/Templates" both mean the Templates folder.
+function parseExcludePaths(raw: string): string[] {
+  return raw
+    .split("\n")
+    .map((p) => p.trim().replace(/^\/+|\/+$/g, "").toLowerCase())
+    .filter((p) => p.length > 0);
+}
+
+// A file is excluded if an entry names it (with or without ".md") or one of its
+// parent folders. Case-insensitive.
+function isExcludedByPath(filePath: string, paths: string[]): boolean {
+  if (paths.length === 0) return false;
+  const lower = filePath.toLowerCase();
+  return paths.some((p) => lower === p || lower === `${p}.md` || lower.startsWith(`${p}/`));
 }
 
 // Priority marker: count the trailing "!" of an item so "!!" ranks above "!"
@@ -885,7 +905,9 @@ export default class ChecklistPlugin extends Plugin {
     const needsFormat = this.settings.dateNotesOnly || this.settings.hideFutureDateNotes;
     const format = needsFormat ? this.getDateNotesFormat() : null;
     const excludeKeywords = parseExcludeKeywords(this.settings.excludeKeywords);
+    const excludePaths = parseExcludePaths(this.settings.excludePaths);
     for (const [path, items] of this.index) {
+      if (isExcludedByPath(path, excludePaths)) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
       if (this.settings.dateNotesOnly && format !== null && !this.isDateNote(file, format)) continue;
@@ -916,7 +938,8 @@ export default class ChecklistPlugin extends Plugin {
     const hasFilters =
       this.settings.dateNotesOnly ||
       this.settings.hideFutureDateNotes ||
-      parseExcludeKeywords(this.settings.excludeKeywords).length > 0;
+      parseExcludeKeywords(this.settings.excludeKeywords).length > 0 ||
+      parseExcludePaths(this.settings.excludePaths).length > 0;
     return hasFilters ? "No open todos match the current filters." : "No open todos.";
   }
 
@@ -1353,6 +1376,20 @@ class ChecklistSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.excludeKeywords)
           .onChange(async (value) => {
             this.plugin.settings.excludeKeywords = value;
+            await this.plugin.saveSettings();
+            this.plugin.applySettingsToViews();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Exclude folders and notes")
+      .setDesc("One path per line. Todos from these folders (including subfolders) or notes are hidden from the panel.")
+      .addTextArea((text) =>
+        text
+          .setPlaceholder("Templates\nArchive/Old projects")
+          .setValue(this.plugin.settings.excludePaths)
+          .onChange(async (value) => {
+            this.plugin.settings.excludePaths = value;
             await this.plugin.saveSettings();
             this.plugin.applySettingsToViews();
           })

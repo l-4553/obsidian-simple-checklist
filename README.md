@@ -24,6 +24,7 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 - **Date notes only** — show todos only from notes whose filename matches your Daily Notes date format
 - **Hide future date notes** — hide todos from date notes dated after today, so planning-ahead notes stay out of the panel
 - **Exclude keywords** — hide todos containing any of the given comma-separated keywords (case-insensitive)
+- **Exclude folders and notes** — hide todos from the listed folders (including subfolders) or notes, one vault path per line (e.g. `Templates` or `Archive/Old note`)
 - **Roll over open todos** — when today's daily note is created, move open todos from past daily notes into it (callout headers are carried along)
 
 ## Usage
