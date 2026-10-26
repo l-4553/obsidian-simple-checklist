@@ -74,7 +74,8 @@ interface DragTodoPayload {
 
 const DRAG_MIME = "application/x-checklist-todo";
 
-// Drop position for moveTodo: next to `todo`, before it or after its nested children.
+// Drop position for moveTodo: next to `todo`, before it or after its nested
+// children. The moved todo takes `todo`'s indentation.
 interface DropAnchor {
   todo: TodoItem;
   after: boolean;
@@ -166,6 +167,26 @@ function blockquotePrefix(line: string): string {
 
 function blockquoteDepth(prefix: string): number {
   return (prefix.match(/>/g) ?? []).length;
+}
+
+// Splits a line into its blockquote/callout marker ("> ", "> > ") and the
+// list indentation that follows it.
+function splitListIndent(line: string): { quote: string; indent: string } {
+  const quote = /^(?:\s*>)+\s?/.exec(line)?.[0] ?? "";
+  const indent = /^[\t ]*/.exec(line.slice(quote.length))?.[0] ?? "";
+  return { quote, indent };
+}
+
+// Re-indents a moved block (a todo and its nested lines) so the todo uses
+// `indent`; nested lines shift by the same amount and keep their structure.
+function reindentBlock(block: string[], indent: string): string[] {
+  const old = splitListIndent(block[0]).indent;
+  if (old === indent) return block;
+  return block.map((line) => {
+    const { quote } = splitListIndent(line);
+    const rest = line.slice(quote.length);
+    return rest.startsWith(old) ? quote + indent + rest.slice(old.length) : line;
+  });
 }
 
 // Given a todo line's index, return the indices of the lines directly nested
@@ -646,15 +667,17 @@ class ChecklistView extends ItemView {
       after = false;
     }
 
-    // Inserting anywhere from the dragged todo's own row to just past its
-    // nested children (same note only) is a no-op.
+    // Same note: dropping onto the dragged todo itself or inside its nested
+    // children does nothing. Right after its children it only matters if the
+    // todo would be re-indented (it takes the indentation of the next row).
     const dragged = rows.findIndex((r) => r.classList.contains("checklist-item-dragging"));
     if (dragged >= 0) {
       const depthOf = (i: number) => this.rowTodos.get(rows[i])?.depth ?? 0;
       let blockEnd = dragged + 1;
       while (blockEnd < rows.length && depthOf(blockEnd) > depthOf(dragged)) blockEnd++;
       const insertAt = after ? rows.length : index;
-      if (insertAt >= dragged && insertAt <= blockEnd) return null;
+      if (insertAt >= dragged && insertAt < blockEnd) return null;
+      if (insertAt === blockEnd && (after || depthOf(index) === depthOf(dragged))) return null;
     }
     return { row: rows[index], after };
   }
@@ -1117,14 +1140,16 @@ export default class ChecklistPlugin extends Plugin {
     });
   }
 
-  // Line a todo dropped next to `anchor` is inserted before: the anchor's own
-  // line, or (after) the line following its nested children. Without an anchor,
-  // or if it can't be found, the end of the note.
-  private resolveInsertLine(lines: string[], anchor?: DropAnchor): number {
-    if (!anchor) return lines.length;
+  // Where a todo dropped next to `anchor` goes: before the anchor's own line,
+  // or (after) the line following its nested children, indented like the
+  // anchor. Without an anchor, or if it can't be found, the end of the note
+  // with the todo's indentation unchanged (indent null).
+  private resolveDrop(lines: string[], anchor?: DropAnchor): { line: number; indent: string | null } {
+    if (!anchor) return { line: lines.length, indent: null };
     const idx = this.findTodoLine(lines, anchor.todo);
-    if (idx < 0) return lines.length;
-    return anchor.after ? idx + 1 + collectDescendantLines(lines, idx).length : idx;
+    if (idx < 0) return { line: lines.length, indent: null };
+    const line = anchor.after ? idx + 1 + collectDescendantLines(lines, idx).length : idx;
+    return { line, indent: splitListIndent(lines[idx]).indent };
   }
 
   async moveTodo(todo: TodoItem, targetFile: TFile, anchor?: DropAnchor): Promise<void> {
@@ -1136,17 +1161,20 @@ export default class ChecklistPlugin extends Plugin {
         const lines = content.split("\n");
         const srcIdx = this.findTodoLine(lines, todo);
         if (srcIdx < 0) return;
-        const insertBeforeLine = this.resolveInsertLine(lines, anchor);
+        const drop = this.resolveDrop(lines, anchor);
+        const insertBeforeLine = drop.line;
         // Move the todo together with its nested children (indented lines that
         // follow it), so dragging a parent keeps its sub-items attached.
         const blockLen = 1 + collectDescendantLines(lines, srcIdx).length;
         // Dropping onto the todo itself or one of its own children is a no-op.
         if (insertBeforeLine !== undefined && insertBeforeLine > srcIdx && insertBeforeLine < srcIdx + blockLen) return;
-        const block = lines.slice(srcIdx, srcIdx + blockLen);
+        const original = lines.slice(srcIdx, srcIdx + blockLen);
+        const block = drop.indent === null ? original : reindentBlock(original, drop.indent);
         lines.splice(srcIdx, blockLen);
         let insertIdx = insertBeforeLine;
         if (srcIdx < insertIdx) insertIdx -= blockLen;
-        if (insertIdx === srcIdx) return;
+        // Same place and same indentation: nothing to do.
+        if (insertIdx === srcIdx && block.every((l, i) => l === original[i])) return;
         lines.splice(insertIdx, 0, ...block);
         await this.app.vault.modify(todo.file, lines.join("\n"));
         this.lastModifiedFile = todo.file;
@@ -1162,8 +1190,8 @@ export default class ChecklistPlugin extends Plugin {
 
         const tgtContent = await this.app.vault.read(targetFile);
         const tgtLines = tgtContent.split("\n");
-        const insertIdx = this.resolveInsertLine(tgtLines, anchor);
-        tgtLines.splice(insertIdx, 0, ...block);
+        const drop = this.resolveDrop(tgtLines, anchor);
+        tgtLines.splice(drop.line, 0, ...(drop.indent === null ? block : reindentBlock(block, drop.indent)));
 
         const srcPath = todo.file.path;
         await this.app.vault.modify(todo.file, srcLines.join("\n"));
