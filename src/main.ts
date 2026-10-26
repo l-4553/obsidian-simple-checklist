@@ -331,8 +331,30 @@ interface AppWithInternalPlugins {
 }
 
 // Matches [[target]], [[target|alias]], [[target#heading]], [[target#heading|alias]],
-// markdown links [label](target), bare http(s) URLs, and inline code `code`.
-const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[([^\]]+)\]\(([^)]+)\)|(https?:\/\/[^\s)<>]+)|`([^`]+)`/g;
+// the "[label](" start of markdown links, bare http(s) URLs, and inline code `code`.
+// Markdown link labels may contain one level of nested brackets; the link target
+// is found by findLinkTargetEnd so parentheses inside URLs are counted.
+// Bare URLs may contain balanced parentheses ("…/Foo_(bar)") but don't swallow
+// a closing ")" around them ("(see https://x.y)").
+const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[((?:[^[\]]|\[[^[\]]*\])+)\]\(|(https?:\/\/(?:[^\s()<>]|\([^\s()<>]*\))+)|`([^`]+)`/g;
+
+// Index of the ")" that closes a markdown link target starting at `start` (just
+// after its "("), counting nested parentheses so URLs like "…?q=(a)&id=1" stay
+// intact. Backslash-escaped characters don't count. Returns -1 if never closed.
+function findLinkTargetEnd(text: string, start: number): number {
+  let depth = 1;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "\\") {
+      i++;
+    } else if (ch === "(") {
+      depth++;
+    } else if (ch === ")" && --depth === 0) {
+      return i;
+    }
+  }
+  return -1;
+}
 
 // External URL = anything with a scheme (http:, https:, mailto:, ftp:, obsidian:, …).
 // Vault-relative targets like "Notes/foo" or "#heading" don't match.
@@ -358,6 +380,7 @@ function renderTodoText(
   let m: RegExpExecArray | null;
   while ((m = LINK_RE.exec(text)) !== null) {
     if (m.index > last) container.appendText(text.slice(last, m.index));
+    let end = m.index + m[0].length;
     if (m[1] !== undefined) {
       const target = m[1].trim();
       const heading = m[2]?.trim() ?? "";
@@ -366,21 +389,32 @@ function renderTodoText(
       const link = container.createEl("a", { cls: "checklist-inline-link", text: label });
       link.addEventListener("click", (e) => { e.stopPropagation(); openLink(target, subpath, sourcePath); });
     } else if (m[4] !== undefined) {
+      const close = findLinkTargetEnd(text, end);
+      if (close === -1 || close === end) {
+        // Unclosed or empty "[label](": keep the "[" as text and rescan right after it,
+        // so links and URLs in the rest of the text are still rendered.
+        container.appendText("[");
+        last = m.index + 1;
+        LINK_RE.lastIndex = last;
+        continue;
+      }
       const label = m[4];
-      const target = m[5];
+      const target = text.slice(end, close).replace(/\\([()])/g, "$1");
+      end = close + 1;
+      LINK_RE.lastIndex = end;
       if (isExternalUrl(target)) {
         createExternalLink(container, label, target);
       } else {
         const link = container.createEl("a", { cls: "checklist-inline-link", text: label });
         link.addEventListener("click", (e) => { e.stopPropagation(); openLink(target, "", sourcePath); });
       }
-    } else if (m[6] !== undefined) {
-      const url = m[6];
+    } else if (m[5] !== undefined) {
+      const url = m[5];
       createExternalLink(container, url, url);
     } else {
-      container.createEl("code", { cls: "checklist-inline-code", text: m[7] });
+      container.createEl("code", { cls: "checklist-inline-code", text: m[6] });
     }
-    last = m.index + m[0].length;
+    last = end;
   }
   if (last < text.length) container.appendText(text.slice(last));
 }
