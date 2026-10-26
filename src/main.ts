@@ -7,6 +7,8 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
+  SettingControl,
+  SettingDefinitionGroup,
   setIcon,
   TFile,
   WorkspaceLeaf,
@@ -58,6 +60,12 @@ interface ChecklistSettings {
   // Note paths pinned to the top of the panel, in pin order (most-recent last).
   pinnedPaths: string[];
 }
+
+// Settings edited through the settings tab (pinnedPaths is managed by the panel).
+type EditableSettingKey = Exclude<keyof ChecklistSettings, "pinnedPaths">;
+type BooleanSettingKey = {
+  [K in EditableSettingKey]: ChecklistSettings[K] extends boolean ? K : never;
+}[EditableSettingKey];
 
 const DEFAULT_SETTINGS: ChecklistSettings = {
   sortMode: "recent",
@@ -476,8 +484,7 @@ function spawnConfetti(originEl: HTMLElement): void {
   const cx = rect.left + rect.width / 2;
   const cy = rect.top + rect.height / 2;
   for (let i = 0; i < 14; i++) {
-    const el = doc.createElement("div");
-    el.className = "checklist-confetti-particle";
+    const el = doc.body.createDiv({ cls: "checklist-confetti-particle" });
     const size = 5 + Math.random() * 5;
     const angle = (i / 14) * 2 * Math.PI + (Math.random() - 0.5) * 0.4;
     const dist = 28 + Math.random() * 24;
@@ -489,7 +496,6 @@ function spawnConfetti(originEl: HTMLElement): void {
       `background:${CONFETTI_COLORS[Math.floor(Math.random() * CONFETTI_COLORS.length)]}`,
       `animation-duration:${380 + Math.random() * 220}ms`,
     ].join(";");
-    doc.body.appendChild(el);
     el.addEventListener("animationend", () => el.remove(), { once: true });
   }
 }
@@ -1482,9 +1488,19 @@ export default class ChecklistPlugin extends Plugin {
 
   // Display-only change: re-render without resetting the note order.
   async setHideNoteTitles(value: boolean): Promise<void> {
-    this.settings.hideNoteTitles = value;
+    await this.updateSetting("hideNoteTitles", value);
+  }
+
+  // Saves one setting changed in the settings tab (or the panel header) and
+  // applies it: titles only need a re-render, roll-over runs once when turned
+  // on, everything else changes sorting/filtering and rebuilds the views.
+  async updateSetting<K extends EditableSettingKey>(key: K, value: ChecklistSettings[K]): Promise<void> {
+    this.settings[key] = value;
     await this.saveSettings();
-    this.refreshView();
+    if (key === "hideNoteTitles") this.refreshView();
+    else if (key === "movePastTodosToToday") {
+      if (value) await this.runRollOverToToday();
+    } else this.applySettingsToViews();
   }
 
   // Called by the settings tab after sort/filter changes so views drop their
@@ -1506,6 +1522,18 @@ export default class ChecklistPlugin extends Plugin {
   }
 }
 
+// Description of the "Exclude todos" box: what each kind of line matches.
+function excludeRulesHelp(): DocumentFragment {
+  return createFragment((frag) => {
+    frag.appendText("Hide todos from the panel. One rule per line:");
+    const list = frag.createEl("ul");
+    list.createEl("li", { text: "define: todos containing this word (case-insensitive)" });
+    list.createEl("li", { text: "Templates/: every note in this folder and its subfolders" });
+    list.createEl("li", { text: "Projects/Games backlog.md: this note" });
+    list.createEl("li", { text: "/weekly planner/: notes whose path matches this regular expression (case-insensitive)" });
+  });
+}
+
 class ChecklistSettingTab extends PluginSettingTab {
   plugin: ChecklistPlugin;
 
@@ -1514,114 +1542,149 @@ class ChecklistSettingTab extends PluginSettingTab {
     this.plugin = plugin;
   }
 
+  // Declarative settings (Obsidian 1.13+): rendered by Obsidian and indexed by
+  // its settings search. display() renders the same definitions on older versions.
+  getSettingDefinitions(): SettingDefinitionGroup<EditableSettingKey>[] {
+    return [
+      {
+        type: "group",
+        heading: "Display",
+        items: [
+          {
+            name: "Note sort order",
+            desc: "How note groups are ordered in the panel. Todos within each note keep their order in the file.",
+            control: {
+              type: "dropdown",
+              key: "sortMode",
+              options: {
+                recent: "Recently modified note first",
+                oldest: "Least recently modified note first",
+                alpha: "Note name (A–Z)",
+                "alpha-desc": "Note name (Z–A)",
+              },
+            },
+          },
+          {
+            name: "Hide note titles",
+            desc:
+              "Show only the todos, without note titles. Dragging then only reorders todos within their own note. " +
+              "Also available as a button in the panel header.",
+            control: { type: "toggle", key: "hideNoteTitles" },
+          },
+        ],
+      },
+      {
+        type: "group",
+        heading: "Filters",
+        items: [
+          {
+            name: "Date notes only",
+            desc: "Show todos only from notes whose filename matches your Daily Notes date format.",
+            control: { type: "toggle", key: "dateNotesOnly" },
+          },
+          {
+            name: "Hide future date notes",
+            desc: "Hide todos from date notes whose filename is a date after today, so planning-ahead notes stay out of the panel.",
+            control: { type: "toggle", key: "hideFutureDateNotes" },
+          },
+          {
+            name: "Exclude todos",
+            desc: excludeRulesHelp(),
+            aliases: ["keyword", "folder", "regex", "ignore"],
+            control: {
+              type: "textarea",
+              key: "excludeRules",
+              placeholder: "define\nTemplates/\nProjects/Games backlog.md\n/weekly planner/",
+              rows: 6,
+              validate: (value) => {
+                const { invalid } = parseExcludeRules(value);
+                if (invalid.length > 0) return `Invalid regular expression: ${invalid.join(", ")}`;
+              },
+            },
+          },
+        ],
+      },
+      {
+        type: "group",
+        heading: "Daily notes",
+        items: [
+          {
+            name: "Roll over open todos",
+            desc:
+              "When today's daily note is created (e.g. via the Daily Notes shortcut), or when this " +
+              "setting is turned on, move open todos from past daily notes into it. Callout headers " +
+              "are copied with todos inside callouts. Past notes are detected using your Daily Notes date format.",
+            control: { type: "toggle", key: "movePastTodosToToday" },
+          },
+        ],
+      },
+    ];
+  }
+
+  setControlValue(key: string, value: unknown): Promise<void> {
+    return this.plugin.updateSetting(key as EditableSettingKey, value as never);
+  }
+
+  // Fallback for Obsidian < 1.13, which doesn't render getSettingDefinitions().
+  // Not called on 1.13+ because the definitions above are non-empty.
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-
-    // ── Display: how the panel looks ──────────────────────────────────────────
-    new Setting(containerEl).setName("Display").setHeading();
-
-    new Setting(containerEl)
-      .setName("Note sort order")
-      .setDesc("How note groups are ordered in the panel. Todos within each note keep their order in the file.")
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption("recent", "Recently modified note first")
-          .addOption("oldest", "Least recently modified note first")
-          .addOption("alpha", "Note name (A–Z)")
-          .addOption("alpha-desc", "Note name (Z–A)")
-          .setValue(this.plugin.settings.sortMode)
-          .onChange(async (value) => {
-            this.plugin.settings.sortMode = value as SortMode;
-            await this.plugin.saveSettings();
-            this.plugin.applySettingsToViews();
-          })
-      );
-
-    new Setting(containerEl)
-      .setName("Hide note titles")
-      .setDesc(
-        "Show only the todos, without note titles. Dragging then only reorders todos within their own note. " +
-          "Also available as a button in the panel header."
-      )
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.hideNoteTitles).onChange(async (value) => {
-          await this.plugin.setHideNoteTitles(value);
-        })
-      );
-
-    // ── Filters: which todos are shown ────────────────────────────────────────
-    new Setting(containerEl).setName("Filters").setHeading();
-
-    new Setting(containerEl)
-      .setName("Date notes only")
-      .setDesc("Show todos only from notes whose filename matches your Daily Notes date format.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.dateNotesOnly).onChange(async (value) => {
-          this.plugin.settings.dateNotesOnly = value;
-          await this.plugin.saveSettings();
-          this.plugin.applySettingsToViews();
-        })
-      );
-
-    new Setting(containerEl)
-      .setName("Hide future date notes")
-      .setDesc("Hide todos from date notes whose filename is a date after today, so planning-ahead notes stay out of the panel.")
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.hideFutureDateNotes).onChange(async (value) => {
-          this.plugin.settings.hideFutureDateNotes = value;
-          await this.plugin.saveSettings();
-          this.plugin.applySettingsToViews();
-        })
-      );
-
-    // ── Exclude todos: one rule per line, its shape decides what it matches ──
-    const excludeSetting = new Setting(containerEl)
-      .setName("Exclude todos")
-      .addTextArea((text) => {
-        text
-          .setPlaceholder("define\nTemplates/\nProjects/Games backlog.md\n/weekly planner/")
-          .setValue(this.plugin.settings.excludeRules)
-          .onChange(async (value) => {
-            this.plugin.settings.excludeRules = value;
-            showExcludeHelp(value);
-            await this.plugin.saveSettings();
-            this.plugin.applySettingsToViews();
-          });
-        text.inputEl.rows = 6;
-      });
-    const showExcludeHelp = (raw: string): void => {
-      const { descEl } = excludeSetting;
-      descEl.empty();
-      descEl.appendText("Hide todos from the panel. One rule per line:");
-      const list = descEl.createEl("ul");
-      list.createEl("li", { text: "define: todos containing this word (case-insensitive)" });
-      list.createEl("li", { text: "Templates/: every note in this folder and its subfolders" });
-      list.createEl("li", { text: "Projects/Games backlog.md: this note" });
-      list.createEl("li", { text: "/weekly planner/: notes whose path matches this regular expression (case-insensitive)" });
-      const { invalid } = parseExcludeRules(raw);
-      if (invalid.length > 0) {
-        descEl.createDiv({ cls: "mod-warning", text: `Invalid regular expression, ignored: ${invalid.join(", ")}` });
+    for (const group of this.getSettingDefinitions()) {
+      if (group.heading) new Setting(containerEl).setName(group.heading).setHeading();
+      for (const item of group.items ?? []) {
+        if (!("control" in item) || !item.control) continue;
+        const setting = new Setting(containerEl).setName(item.name);
+        if (item.desc) setting.setDesc(item.desc);
+        this.addControl(setting, item.control);
       }
-    };
-    showExcludeHelp(this.plugin.settings.excludeRules);
+    }
+  }
 
-    // ── Daily notes: changes made to your notes ───────────────────────────────
-    new Setting(containerEl).setName("Daily notes").setHeading();
-
-    new Setting(containerEl)
-      .setName("Roll over open todos")
-      .setDesc(
-        "When today's daily note is created (e.g. via the Daily Notes shortcut), or when this " +
-          "setting is turned on, move open todos from past daily notes into it. Callout headers " +
-          "are copied with todos inside callouts. Past notes are detected using your Daily Notes date format."
-      )
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.movePastTodosToToday).onChange(async (value) => {
-          this.plugin.settings.movePastTodosToToday = value;
-          await this.plugin.saveSettings();
-          if (value) await this.plugin.runRollOverToToday();
-        })
-      );
+  private addControl(setting: Setting, control: SettingControl<EditableSettingKey>): void {
+    const settings = this.plugin.settings;
+    switch (control.type) {
+      case "toggle": {
+        const key = control.key as BooleanSettingKey;
+        setting.addToggle((toggle) =>
+          toggle.setValue(settings[key]).onChange((value) => this.plugin.updateSetting(key, value))
+        );
+        break;
+      }
+      case "dropdown": {
+        const { options } = control;
+        const key = control.key as "sortMode";
+        setting.addDropdown((dropdown) =>
+          dropdown
+            .addOptions(options)
+            .setValue(settings[key])
+            .onChange((value) => this.plugin.updateSetting(key, value as SortMode))
+        );
+        break;
+      }
+      case "textarea": {
+        const { placeholder, rows, validate } = control;
+        const key = control.key as "excludeRules";
+        // Mirrors the declarative API: show the validation message and only
+        // persist values that pass.
+        const errorEl = setting.descEl.createDiv({ cls: "mod-warning" });
+        const check = async (value: string): Promise<boolean> => {
+          const error = (await validate?.(value)) || "";
+          errorEl.setText(error);
+          return !error;
+        };
+        setting.addTextArea((text) => {
+          text
+            .setPlaceholder(placeholder ?? "")
+            .setValue(settings[key])
+            .onChange(async (value) => {
+              if (await check(value)) await this.plugin.updateSetting(key, value);
+            });
+          if (rows) text.inputEl.rows = rows;
+        });
+        void check(settings[key]);
+        break;
+      }
+    }
   }
 }
