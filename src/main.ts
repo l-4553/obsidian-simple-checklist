@@ -53,7 +53,8 @@ interface ChecklistSettings {
   dateNotesOnly: boolean;
   hideFutureDateNotes: boolean;
   movePastTodosToToday: boolean;
-  excludeKeywords: string;
+  // Exclude rules, one per line: keyword, "Folder/", "Note.md" or "/regex/".
+  excludeRules: string;
   // Note paths pinned to the top of the panel, in pin order (most-recent last).
   pinnedPaths: string[];
 }
@@ -64,7 +65,7 @@ const DEFAULT_SETTINGS: ChecklistSettings = {
   dateNotesOnly: false,
   hideFutureDateNotes: false,
   movePastTodosToToday: false,
-  excludeKeywords: "",
+  excludeRules: "",
   pinnedPaths: [],
 };
 
@@ -88,14 +89,57 @@ function isDragTodoPayload(value: unknown): value is DragTodoPayload {
   );
 }
 
-function parseExcludeKeywords(raw: string): string[] {
-  return raw.split(",").map((k) => k.trim()).filter((k) => k.length > 0);
+// Exclude rules, one per line. The shape of a line decides what it matches:
+//   /weekly planner/   regex on the note path (case-insensitive)
+//   Templates/         folder, including subfolders
+//   Inbox/Scratch.md   single note
+//   define             keyword in the todo text (case-insensitive)
+interface ExcludeRules {
+  keywords: string[];
+  folders: string[];
+  notes: string[];
+  patterns: RegExp[];
+  // Regex lines that don't compile; ignored, but listed in the settings.
+  invalid: string[];
 }
 
-function isExcludedByKeyword(text: string, keywords: string[]): boolean {
-  if (keywords.length === 0) return false;
+function parseExcludeRules(raw: string): ExcludeRules {
+  const rules: ExcludeRules = { keywords: [], folders: [], notes: [], patterns: [], invalid: [] };
+  for (const line of raw.split("\n").map((l) => l.trim()).filter((l) => l.length > 0)) {
+    if (line.length > 2 && line.startsWith("/") && line.endsWith("/")) {
+      try {
+        rules.patterns.push(new RegExp(line.slice(1, -1), "i"));
+      } catch {
+        rules.invalid.push(line);
+      }
+    } else if (line.endsWith("/")) {
+      const folder = line.replace(/^\/+|\/+$/g, "").toLowerCase();
+      if (folder.length > 0) rules.folders.push(folder);
+    } else if (line.toLowerCase().endsWith(".md")) {
+      rules.notes.push(line.replace(/^\/+/, "").toLowerCase());
+    } else {
+      rules.keywords.push(line.toLowerCase());
+    }
+  }
+  return rules;
+}
+
+function hasExcludeRules(rules: ExcludeRules): boolean {
+  return rules.keywords.length + rules.folders.length + rules.notes.length + rules.patterns.length > 0;
+}
+
+function isNoteExcluded(filePath: string, rules: ExcludeRules): boolean {
+  const lower = filePath.toLowerCase();
+  return (
+    rules.notes.includes(lower) ||
+    rules.folders.some((f) => lower.startsWith(`${f}/`)) ||
+    rules.patterns.some((re) => re.test(filePath))
+  );
+}
+
+function isTodoExcluded(text: string, rules: ExcludeRules): boolean {
   const lower = text.toLowerCase();
-  return keywords.some((k) => lower.includes(k.toLowerCase()));
+  return rules.keywords.some((k) => lower.includes(k));
 }
 
 // Priority marker: count the trailing "!" of an item so "!!" ranks above "!"
@@ -798,8 +842,18 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const stored = (await this.loadData()) as Partial<ChecklistSettings> | null;
-    this.settings = { ...DEFAULT_SETTINGS, ...(stored ?? {}) };
+    const stored = (await this.loadData()) as (Partial<ChecklistSettings> & { excludeKeywords?: string }) | null;
+    const { excludeKeywords, ...rest } = stored ?? {};
+    this.settings = { ...DEFAULT_SETTINGS, ...rest };
+    // Up to 1.10.x, exclusions were a comma-separated keyword list. Carry them
+    // over as one keyword per line.
+    if (rest.excludeRules === undefined && excludeKeywords) {
+      this.settings.excludeRules = excludeKeywords
+        .split(",")
+        .map((k) => k.trim())
+        .filter((k) => k.length > 0)
+        .join("\n");
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -921,8 +975,9 @@ export default class ChecklistPlugin extends Plugin {
     // Resolve the date format once if any date-based filter is active.
     const needsFormat = this.settings.dateNotesOnly || this.settings.hideFutureDateNotes;
     const format = needsFormat ? this.getDateNotesFormat() : null;
-    const excludeKeywords = parseExcludeKeywords(this.settings.excludeKeywords);
+    const exclude = parseExcludeRules(this.settings.excludeRules);
     for (const [path, items] of this.index) {
+      if (isNoteExcluded(path, exclude)) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
       if (this.settings.dateNotesOnly && format !== null && !this.isDateNote(file, format)) continue;
@@ -937,7 +992,7 @@ export default class ChecklistPlugin extends Plugin {
         while (stack.length > 0 && stack[stack.length - 1] >= item.indent) stack.pop();
         const depth = stack.length;
         stack.push(item.indent);
-        if (isExcludedByKeyword(item.text, excludeKeywords)) continue;
+        if (isTodoExcluded(item.text, exclude)) continue;
         noteTodos.push({ file, lineIndex: item.lineIndex, text: item.text, depth });
       }
       // Priority-sort within the note, per indentation level, keeping each
@@ -953,7 +1008,7 @@ export default class ChecklistPlugin extends Plugin {
     const hasFilters =
       this.settings.dateNotesOnly ||
       this.settings.hideFutureDateNotes ||
-      parseExcludeKeywords(this.settings.excludeKeywords).length > 0;
+      hasExcludeRules(parseExcludeRules(this.settings.excludeRules));
     return hasFilters ? "No open todos match the current filters." : "No open todos.";
   }
 
@@ -1404,19 +1459,36 @@ class ChecklistSettingTab extends PluginSettingTab {
         })
       );
 
-    new Setting(containerEl)
-      .setName("Exclude keywords")
-      .setDesc("Comma-separated words. Todos containing any keyword are hidden from the panel (case-insensitive).")
-      .addText((text) =>
+    // ── Exclude todos: one rule per line, its shape decides what it matches ──
+    const excludeSetting = new Setting(containerEl)
+      .setName("Exclude todos")
+      .addTextArea((text) => {
         text
-          .setPlaceholder("define, ai, TODO")
-          .setValue(this.plugin.settings.excludeKeywords)
+          .setPlaceholder("define\nTemplates/\nProjects/Games backlog.md\n/weekly planner/")
+          .setValue(this.plugin.settings.excludeRules)
           .onChange(async (value) => {
-            this.plugin.settings.excludeKeywords = value;
+            this.plugin.settings.excludeRules = value;
+            showExcludeHelp(value);
             await this.plugin.saveSettings();
             this.plugin.applySettingsToViews();
-          })
-      );
+          });
+        text.inputEl.rows = 6;
+      });
+    const showExcludeHelp = (raw: string): void => {
+      const { descEl } = excludeSetting;
+      descEl.empty();
+      descEl.appendText("Hide todos from the panel. One rule per line:");
+      const list = descEl.createEl("ul");
+      list.createEl("li", { text: "define: todos containing this word (case-insensitive)" });
+      list.createEl("li", { text: "Templates/: every note in this folder and its subfolders" });
+      list.createEl("li", { text: "Projects/Games backlog.md: this note" });
+      list.createEl("li", { text: "/weekly planner/: notes whose path matches this regular expression (case-insensitive)" });
+      const { invalid } = parseExcludeRules(raw);
+      if (invalid.length > 0) {
+        descEl.createDiv({ cls: "mod-warning", text: `Invalid regular expression, ignored: ${invalid.join(", ")}` });
+      }
+    };
+    showExcludeHelp(this.plugin.settings.excludeRules);
 
     // ── Daily notes: changes made to your notes ───────────────────────────────
     new Setting(containerEl).setName("Daily notes").setHeading();

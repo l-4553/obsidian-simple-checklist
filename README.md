@@ -29,7 +29,14 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 
 - **Date notes only** — show todos only from notes whose filename matches your Daily Notes date format
 - **Hide future date notes** — hide todos from date notes dated after today, so planning-ahead notes stay out of the panel
-- **Exclude keywords** — hide todos containing any of the given comma-separated keywords (case-insensitive)
+- **Exclude todos** — hide todos from the panel, one rule per line; the shape of a line decides what it matches:
+
+  | Line | Hides |
+  |---|---|
+  | `define` | todos containing the word (case-insensitive) |
+  | `Templates/` | every note in the folder and its subfolders |
+  | `Projects/Games backlog.md` | that note |
+  | `/weekly planner/` | notes whose path matches the regular expression (case-insensitive); invalid ones are flagged in the settings and ignored |
 
 ### Daily notes
 
