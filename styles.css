@@ -161,6 +161,11 @@
   white-space: pre-wrap;
 }
 
+.checklist-inline-highlight {
+  background-color: var(--highlight-background, var(--text-highlight-bg));
+  color: var(--text-normal);
+}
+
 .checklist-inline-link {
   color: var(--link-color);
   text-decoration: none;
