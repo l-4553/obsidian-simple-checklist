@@ -381,6 +381,7 @@ interface AppWithInternalPlugins {
 
 // Matches [[target]], [[target|alias]], [[target#heading]], [[target#heading|alias]],
 // the "[label](" start of markdown links, bare http(s) URLs, and inline code `code`.
+// ==Highlights== are found afterwards in the plain text between these (see findHighlightMarkers).
 // Markdown link labels may contain one level of nested brackets; the link target
 // is found by findLinkTargetEnd so parentheses inside URLs are counted.
 // Bare URLs may contain balanced parentheses ("…/Foo_(bar)") but don't swallow
@@ -418,54 +419,136 @@ function createExternalLink(container: HTMLElement, label: string, href: string)
   link.addEventListener("click", (e) => { e.stopPropagation(); });
 }
 
+type TodoTextToken =
+  | { kind: "text"; start: number; end: number }
+  | { kind: "wikilink"; target: string; subpath: string; label: string }
+  | { kind: "link"; target: string; label: string }
+  | { kind: "url"; url: string }
+  | { kind: "code"; code: string };
+
+// Splits todo text into plain-text ranges and links / URLs / inline code.
+function tokenizeTodoText(text: string): TodoTextToken[] {
+  const tokens: TodoTextToken[] = [];
+  const pushText = (start: number, end: number) => {
+    if (end <= start) return;
+    const prev = tokens[tokens.length - 1];
+    if (prev?.kind === "text" && prev.end === start) prev.end = end;
+    else tokens.push({ kind: "text", start, end });
+  };
+  let last = 0;
+  LINK_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = LINK_RE.exec(text)) !== null) {
+    pushText(last, m.index);
+    let end = m.index + m[0].length;
+    if (m[1] !== undefined) {
+      const target = m[1].trim();
+      const heading = m[2]?.trim() ?? "";
+      const label = m[3]?.trim() || (heading ? `${target} > ${heading}` : target);
+      tokens.push({ kind: "wikilink", target, subpath: heading ? `#${heading}` : "", label });
+    } else if (m[4] !== undefined) {
+      const close = findLinkTargetEnd(text, end);
+      if (close === -1 || close === end) {
+        // Unclosed or empty "[label](": keep the "[" as text and rescan right after it,
+        // so links and URLs in the rest of the text are still rendered.
+        pushText(m.index, m.index + 1);
+        last = m.index + 1;
+        LINK_RE.lastIndex = last;
+        continue;
+      }
+      const target = text.slice(end, close).replace(/\\([()])/g, "$1");
+      end = close + 1;
+      LINK_RE.lastIndex = end;
+      tokens.push({ kind: "link", target, label: m[4] });
+    } else if (m[5] !== undefined) {
+      tokens.push({ kind: "url", url: m[5] });
+    } else {
+      tokens.push({ kind: "code", code: m[6] });
+    }
+    last = end;
+  }
+  pushText(last, text.length);
+  return tokens;
+}
+
+// Start offsets of the "==" markers that open/close ==highlights==, looking only
+// at plain-text ranges (never inside links or inline code). The markers have to
+// touch the highlighted text: an opening "==" must be followed by a non-space
+// character and a closing "==" preceded by one, so "a == b" stays as is. Runs of
+// three or more "=" and backslash-escaped "\==" are never markers. An opener
+// without a matching closer stays literal text.
+function findHighlightMarkers(text: string, tokens: TodoTextToken[]): Set<number> {
+  const markers = new Set<number>();
+  let open = -1;
+  for (const token of tokens) {
+    if (token.kind !== "text") continue;
+    for (let i = token.start; i + 1 < token.end; i++) {
+      if (text[i] !== "=" || text[i + 1] !== "=") continue;
+      const before = text[i - 1] ?? "";
+      const after = text[i + 2] ?? "";
+      if (before === "=" || after === "=" || before === "\\") {
+        while (text[i + 1] === "=") i++;
+        continue;
+      }
+      if (open === -1) {
+        if (after !== "" && !/\s/.test(after)) open = i;
+      } else if (before !== "" && !/\s/.test(before)) {
+        markers.add(open);
+        markers.add(i);
+        open = -1;
+      }
+      i++;
+    }
+  }
+  return markers;
+}
+
 function renderTodoText(
   container: HTMLElement,
   text: string,
   sourcePath: string,
   openLink: (target: string, subpath: string, source: string) => void
 ): void {
-  let last = 0;
-  LINK_RE.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = LINK_RE.exec(text)) !== null) {
-    if (m.index > last) container.appendText(text.slice(last, m.index));
-    let end = m.index + m[0].length;
-    if (m[1] !== undefined) {
-      const target = m[1].trim();
-      const heading = m[2]?.trim() ?? "";
-      const label = m[3]?.trim() || (heading ? `${target} > ${heading}` : target);
-      const subpath = heading ? `#${heading}` : "";
-      const link = container.createEl("a", { cls: "checklist-inline-link", text: label });
-      link.addEventListener("click", (e) => { e.stopPropagation(); openLink(target, subpath, sourcePath); });
-    } else if (m[4] !== undefined) {
-      const close = findLinkTargetEnd(text, end);
-      if (close === -1 || close === end) {
-        // Unclosed or empty "[label](": keep the "[" as text and rescan right after it,
-        // so links and URLs in the rest of the text are still rendered.
-        container.appendText("[");
-        last = m.index + 1;
-        LINK_RE.lastIndex = last;
-        continue;
+  const tokens = tokenizeTodoText(text);
+  const markers = findHighlightMarkers(text, tokens);
+  let target = container;
+  for (const token of tokens) {
+    switch (token.kind) {
+      case "text": {
+        let last = token.start;
+        for (let i = token.start; i < token.end; i++) {
+          if (!markers.has(i)) continue;
+          if (i > last) target.appendText(text.slice(last, i));
+          target = target === container
+            ? container.createEl("mark", { cls: "checklist-inline-highlight" })
+            : container;
+          last = i + 2;
+          i++;
+        }
+        if (token.end > last) target.appendText(text.slice(last, token.end));
+        break;
       }
-      const label = m[4];
-      const target = text.slice(end, close).replace(/\\([()])/g, "$1");
-      end = close + 1;
-      LINK_RE.lastIndex = end;
-      if (isExternalUrl(target)) {
-        createExternalLink(container, label, target);
-      } else {
-        const link = container.createEl("a", { cls: "checklist-inline-link", text: label });
-        link.addEventListener("click", (e) => { e.stopPropagation(); openLink(target, "", sourcePath); });
+      case "wikilink": {
+        const link = target.createEl("a", { cls: "checklist-inline-link", text: token.label });
+        link.addEventListener("click", (e) => { e.stopPropagation(); openLink(token.target, token.subpath, sourcePath); });
+        break;
       }
-    } else if (m[5] !== undefined) {
-      const url = m[5];
-      createExternalLink(container, url, url);
-    } else {
-      container.createEl("code", { cls: "checklist-inline-code", text: m[6] });
+      case "link":
+        if (isExternalUrl(token.target)) {
+          createExternalLink(target, token.label, token.target);
+        } else {
+          const link = target.createEl("a", { cls: "checklist-inline-link", text: token.label });
+          link.addEventListener("click", (e) => { e.stopPropagation(); openLink(token.target, "", sourcePath); });
+        }
+        break;
+      case "url":
+        createExternalLink(target, token.url, token.url);
+        break;
+      case "code":
+        target.createEl("code", { cls: "checklist-inline-code", text: token.code });
+        break;
     }
-    last = end;
   }
-  if (last < text.length) container.appendText(text.slice(last));
 }
 
 
