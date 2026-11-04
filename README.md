@@ -15,7 +15,7 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 - **Drag and drop** — reorder todos or move them into another note by dragging; an accent-colored line shows exactly where the todo will land (above or below a todo), and its nested sub-todos are carried along
 - **Callout support** — todos written inside callouts (`> - [ ]`) are picked up too, with their callout header preserved
 - **Inline rendering** — wiki links (`[[Note]]`), Markdown links, inline code (`` `code` ``) and highlights (`==text==`) inside todo text are rendered inline
-- **Priority by `!`** — todos ending in `!` float to the top of their note, with `!!` above `!` above none
+- **Priority by `!`** — todos ending in `!` float to the top of their note, with `!!` above `!` above none; todos containing a `==highlight==` come next, above plain todos
 - **Live updates** — the panel refreshes automatically as you edit your notes
 
 ## Settings

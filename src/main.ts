@@ -166,7 +166,8 @@ function trailingBangs(text: string): number {
 
 // Reorder a note's todos (given in line order, each carrying its nesting `depth`)
 // so priority sorting happens per indentation level: siblings under the same
-// parent are ordered by trailing "!" (more first, ties keep written order), and
+// parent are ordered by trailing "!" (more first), then ==highlighted== todos
+// before plain ones (ties keep written order), and
 // every item carries its nested descendants along with it. A "!" on a parent
 // only reorders it among its siblings — it never lifts a nested item across
 // levels, and never leaves that item's children behind.
@@ -183,13 +184,11 @@ function sortTodosByPriority(items: TodoItem[]): TodoItem[] {
       groups.push({ item: items[i], children: order(i + 1, j) });
       i = j;
     }
-    // Sort siblings by trailing "!" (descending), keeping written order on ties.
+    // Sort siblings by trailing "!" (descending), then highlighted before plain,
+    // keeping written order on ties.
     const sorted = groups
-      .map((g, idx) => ({ g, idx }))
-      .sort((a, b) => {
-        const d = trailingBangs(b.g.item.text) - trailingBangs(a.g.item.text);
-        return d !== 0 ? d : a.idx - b.idx;
-      });
+      .map((g, idx) => ({ g, idx, bangs: trailingBangs(g.item.text), mark: hasHighlight(g.item.text) ? 1 : 0 }))
+      .sort((a, b) => (b.bangs - a.bangs) || (b.mark - a.mark) || (a.idx - b.idx));
     const out: TodoItem[] = [];
     for (const { g } of sorted) out.push(g.item, ...g.children);
     return out;
@@ -501,6 +500,11 @@ function findHighlightMarkers(text: string, tokens: TodoTextToken[]): Set<number
     }
   }
   return markers;
+}
+
+// Whether the todo text contains at least one rendered ==highlight==.
+function hasHighlight(text: string): boolean {
+  return findHighlightMarkers(text, tokenizeTodoText(text)).size > 0;
 }
 
 function renderTodoText(
