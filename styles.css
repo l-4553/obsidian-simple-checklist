@@ -162,7 +162,7 @@
 }
 
 .checklist-inline-highlight {
-  background-color: var(--text-highlight-bg);
+  background-color: var(--highlight-background, var(--text-highlight-bg));
   color: var(--text-normal);
 }
 
