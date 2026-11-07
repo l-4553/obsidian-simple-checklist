@@ -3,7 +3,7 @@
   "name": "Simple Checklist",
   "version": "1.10.12",
   "minAppVersion": "1.7.2",
-  "description": "Simple Reminder side Panel showing all open TODOs across your vault.",
+  "description": "Simple reminder side panel showing all open todos across your vault.",
   "author": "Lasse",
   "authorUrl": "https://github.com/l-4553",
   "isDesktopOnly": false
