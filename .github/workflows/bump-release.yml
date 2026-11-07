@@ -1,19 +1,36 @@
 name: Bump & Release
 
-# Runs automatically on every push to main (i.e. every merged PR) and can
-# also be started by hand (Actions -> "Bump & Release" -> Run workflow) to
-# pick a different bump level. It bumps the version (patch by default),
-# commits "Release X.Y.Z", tags, builds, and publishes the GitHub release
-# with the built artifacts.
+# Runs automatically when a merged PR (or any push) lands on main, and can
+# also be started by hand (Actions -> "Bump & Release" -> Run workflow).
+# It bumps the version, commits "Release X.Y.Z", tags, builds, attests and
+# publishes the GitHub release with the built artifacts.
 #
-# The "Release X.Y.Z" commit is pushed with GITHUB_TOKEN, which does not
-# trigger new workflow runs, so the workflow cannot loop on itself; the
-# job-level `if` below skips release commits as an extra safeguard.
+# Bump level:
+#   - push: patch, or minor/major when the merged PR carries the label
+#     `release:minor` / `release:major` (the highest one wins).
+#   - manual run: the `level` input (patch by default).
+#
+# Pushes that only touch docs, LICENSE or .github/ do not release.
+#
+# Safety:
+#   - The "Release X.Y.Z" commit is pushed with GITHUB_TOKEN, which does not
+#     trigger push workflows, so the workflow cannot loop on itself; the
+#     job-level `if` skips bot commits as an extra safeguard.
+#   - Re-running a failed run never bumps twice: if main's tip is a bot
+#     release commit whose GitHub release is missing, the run finishes that
+#     release instead of creating a new version.
+#   - Commit and tag are pushed atomically, after attestation. If main moved
+#     in the meantime, nothing is pushed and the run dispatches a fresh run
+#     that releases the new tip (including this run's changes).
 
 on:
   push:
     branches:
       - main
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.github/**'
   workflow_dispatch:
     inputs:
       level:
@@ -24,8 +41,12 @@ on:
           - minor
           - major
         default: patch
+      retry:
+        description: Internal — set when a run re-dispatches itself after main moved
+        type: boolean
+        default: false
 
-# Merges landing close together release one after another, never in parallel.
+# Runs execute one at a time, never in parallel.
 concurrency:
   group: bump-release
   cancel-in-progress: false
@@ -34,11 +55,15 @@ permissions:
   contents: write
   id-token: write
   attestations: write
+  pull-requests: read
+  actions: write
 
 jobs:
   bump-release:
-    if: ${{ !startsWith(github.event.head_commit.message, 'Release ') }}
+    if: ${{ github.event_name != 'push' || github.event.head_commit.author.name != 'github-actions[bot]' }}
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,18 +72,60 @@ jobs:
           ref: ${{ github.ref }}
           fetch-depth: 0
 
+      - name: Decide what to do
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_LEVEL: ${{ inputs.level }}
+          RETRY: ${{ inputs.retry }}
+        run: |
+          set -euo pipefail
+          AUTHOR=$(git log -1 --format=%an)
+          SUBJECT=$(git log -1 --format=%s)
+
+          # Tip is a bot release commit: finish it if its release is missing,
+          # otherwise the changes are already released.
+          if [ "$AUTHOR" = "github-actions[bot]" ] && [[ "$SUBJECT" =~ ^Release\ ([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            V="${BASH_REMATCH[1]}"
+            if ! gh release view "$V" >/dev/null 2>&1; then
+              echo "::notice::Finishing release $V (tag exists, GitHub release missing)"
+              echo "mode=resume" >> "$GITHUB_OUTPUT"
+              echo "version=$V" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$EVENT" = "push" ] || [ "$RETRY" = "true" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+              echo "::notice::main is already released as $V, nothing to do"
+              echo "mode=skip" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          if [ "$EVENT" = "push" ]; then
+            LABELS=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '[.[].labels[].name] | join(" ")')
+            LEVEL=patch
+            case " $LABELS " in *" release:minor "*) LEVEL=minor ;; esac
+            case " $LABELS " in *" release:major "*) LEVEL=major ;; esac
+          else
+            LEVEL="${INPUT_LEVEL:-patch}"
+          fi
+          echo "Bump level: $LEVEL"
+          echo "mode=bump" >> "$GITHUB_OUTPUT"
+          echo "level=$LEVEL" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-node@v4
+        if: steps.plan.outputs.mode != 'skip'
         with:
           node-version: 20
 
       - name: Bump version (package.json + manifest.json)
         id: bump
+        if: steps.plan.outputs.mode == 'bump'
         env:
-          LEVEL: ${{ inputs.level || 'patch' }}
+          LEVEL: ${{ steps.plan.outputs.level }}
         run: |
           VERSION=$(node -e '
             const fs = require("fs");
-            const l = process.env.LEVEL || "patch";
+            const l = process.env.LEVEL;
             let [a, b, c] = require("./package.json").version.split(".").map(Number);
             if (l === "major") { a++; b = 0; c = 0; }
             else if (l === "minor") { b++; c = 0; }
@@ -75,10 +142,13 @@ jobs:
           ')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - run: npm ci
-      - run: npm run build
+      - if: steps.plan.outputs.mode != 'skip'
+        run: npm ci
+      - if: steps.plan.outputs.mode != 'skip'
+        run: npm run build
 
-      - name: Commit, tag and push
+      - name: Commit and tag (local)
+        if: steps.plan.outputs.mode == 'bump'
         env:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
@@ -87,10 +157,9 @@ jobs:
           git add package.json manifest.json
           git commit -m "Release $VERSION"
           git tag "$VERSION"
-          git push origin "HEAD:$GITHUB_REF_NAME"
-          git push origin "refs/tags/$VERSION"
 
       - name: Attest build artifacts
+        if: steps.plan.outputs.mode != 'skip'
         uses: actions/attest-build-provenance@v1
         with:
           subject-path: |
@@ -98,10 +167,33 @@ jobs:
             styles.css
             manifest.json
 
+      - name: Push commit and tag
+        id: push
+        if: steps.plan.outputs.mode == 'bump'
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          LEVEL: ${{ steps.plan.outputs.level }}
+        run: |
+          # Atomic: either both the release commit and the tag land, or neither.
+          if git push --atomic origin "HEAD:$GITHUB_REF_NAME" "refs/tags/$VERSION"; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          else
+            # Only retry when main really moved; any other push error fails the run.
+            git fetch origin "$GITHUB_REF_NAME"
+            if [ "$(git rev-parse FETCH_HEAD)" = "$(git rev-parse HEAD^)" ]; then
+              echo "::error::Push failed although main did not move"
+              exit 1
+            fi
+            echo "::warning::main moved during the run; nothing was pushed. Dispatching a fresh run to release the new tip."
+            gh workflow run bump-release.yml --ref "$GITHUB_REF_NAME" -f level="$LEVEL" -f retry=true
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create release
+        if: steps.plan.outputs.mode == 'resume' || steps.push.outputs.pushed == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.bump.outputs.version }}
+          tag_name: ${{ steps.bump.outputs.version || steps.plan.outputs.version }}
           generate_release_notes: true
           files: |
             main.js
