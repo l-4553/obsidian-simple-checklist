@@ -1,9 +1,9 @@
 {
   "id": "simple-checklist",
   "name": "Simple Checklist",
-  "version": "1.10.12",
+  "version": "1.10.13",
   "minAppVersion": "1.7.2",
-  "description": "Side panel showing open todos from the current note, its folder, or the entire vault.",
+  "description": "Simple reminder side panel showing all open todos across your vault.",
   "author": "Lasse",
   "authorUrl": "https://github.com/l-4553",
   "isDesktopOnly": false
