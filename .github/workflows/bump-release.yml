@@ -1,27 +1,34 @@
 name: Bump & Release
 
-# One-click release, triggered manually from the GitHub Actions UI
-# (Actions -> "Bump & Release" -> Run workflow). Replaces the local
-# "bump manifest.json + package.json, commit, tag, push" dance:
-# it bumps the version (patch by default), commits, tags, builds, and
-# publishes the GitHub release with the built artifacts.
+# Runs automatically on every push to main (i.e. every merged PR) and can
+# also be started by hand (Actions -> "Bump & Release" -> Run workflow) to
+# pick a different bump level. It bumps the version (minor by default),
+# commits "Release X.Y.Z", tags, builds, and publishes the GitHub release
+# with the built artifacts.
 #
-# This job builds and releases itself rather than relying on the
-# tag-triggered release.yml, because a tag pushed with GITHUB_TOKEN does
-# not trigger other workflows. release.yml still handles tags pushed by
-# hand, so the two never double-release.
+# The "Release X.Y.Z" commit is pushed with GITHUB_TOKEN, which does not
+# trigger new workflow runs, so the workflow cannot loop on itself; the
+# job-level `if` below skips release commits as an extra safeguard.
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       level:
         description: Version bump level
         type: choice
         options:
-          - patch
           - minor
+          - patch
           - major
-        default: patch
+        default: minor
+
+# Merges landing close together release one after another, never in parallel.
+concurrency:
+  group: bump-release
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -30,10 +37,14 @@ permissions:
 
 jobs:
   bump-release:
+    if: ${{ !startsWith(github.event.head_commit.message, 'Release ') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
+          # Latest tip of the branch, not the triggering commit: a queued run
+          # must build on top of the previous run's release commit.
+          ref: ${{ github.ref }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
@@ -43,15 +54,16 @@ jobs:
       - name: Bump version (package.json + manifest.json)
         id: bump
         env:
-          LEVEL: ${{ inputs.level }}
+          LEVEL: ${{ inputs.level || 'minor' }}
         run: |
           VERSION=$(node -e '
             const fs = require("fs");
-            const l = process.env.LEVEL || "patch";
+            const l = process.env.LEVEL || "minor";
             let [a, b, c] = require("./package.json").version.split(".").map(Number);
             if (l === "major") { a++; b = 0; c = 0; }
             else if (l === "minor") { b++; c = 0; }
-            else { c++; }
+            else if (l === "patch") { c++; }
+            else { throw new Error("unknown bump level: " + l); }
             const nv = `${a}.${b}.${c}`;
             for (const f of ["package.json", "manifest.json"]) {
               const j = JSON.parse(fs.readFileSync(f, "utf8"));
