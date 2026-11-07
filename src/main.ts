@@ -33,6 +33,17 @@ interface TodoItem {
 }
 
 type SortMode = "recent" | "oldest" | "alpha" | "alpha-desc";
+type TodoScope = "vault" | "note" | "folder";
+
+const SCOPE_OPTIONS: Record<TodoScope, string> = {
+  vault: "Entire vault",
+  note: "Current note",
+  folder: "Current folder and subfolders",
+};
+
+function isTodoScope(value: unknown): value is TodoScope {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(SCOPE_OPTIONS, value);
+}
 
 function compareNoteGroups(a: TFile, b: TFile, mode: SortMode): number {
   switch (mode) {
@@ -49,6 +60,7 @@ function compareNoteGroups(a: TFile, b: TFile, mode: SortMode): number {
 }
 
 interface ChecklistSettings {
+  todoScope: TodoScope;
   sortMode: SortMode;
   // Show only the todos, without note titles and dividers ("bare" mode).
   hideNoteTitles: boolean;
@@ -68,6 +80,7 @@ type BooleanSettingKey = {
 }[EditableSettingKey];
 
 const DEFAULT_SETTINGS: ChecklistSettings = {
+  todoScope: "vault",
   sortMode: "recent",
   hideNoteTitles: false,
   dateNotesOnly: false,
@@ -1023,6 +1036,11 @@ export default class ChecklistPlugin extends Plugin {
   private lastModifiedFile: TFile | null = null;
   private undoStack: Array<() => Promise<void>> = [];
   private suppressRollOverOnCreate = false;
+  // Note or folder the panel was last rendered for (see getScopeKey).
+  private renderedScopeKey: string | null = null;
+  // Markdown note the note/folder scope is based on. Kept while a non-Markdown
+  // file (PDF, canvas, image) is active.
+  private scopeNote: TFile | null = null;
 
   private enqueue(fn: () => Promise<void>): Promise<void> {
     this.writeQueue = this.writeQueue.then(fn);
@@ -1033,6 +1051,7 @@ export default class ChecklistPlugin extends Plugin {
     const stored = (await this.loadData()) as (Partial<ChecklistSettings> & { excludeKeywords?: string }) | null;
     const { excludeKeywords, ...rest } = stored ?? {};
     this.settings = { ...DEFAULT_SETTINGS, ...rest };
+    if (!isTodoScope(this.settings.todoScope)) this.settings.todoScope = "vault";
     // Up to 1.10.x, exclusions were a comma-separated keyword list. Carry them
     // over as one keyword per line.
     if (rest.excludeRules === undefined && excludeKeywords) {
@@ -1065,6 +1084,19 @@ export default class ChecklistPlugin extends Plugin {
       this.refreshView();
     });
 
+    // getActiveFile retains the most recently active file while the sidebar
+    // has focus. Both events cover switching tabs and opening in the same tab.
+    // Re-render only when the note or folder in scope actually changed.
+    const refreshScope = () => {
+      const file = this.app.workspace.getActiveFile();
+      if (!file) this.scopeNote = null;
+      else if (file.extension === "md") this.scopeNote = file;
+      if (this.settings.todoScope === "vault") return;
+      if (this.getScopeKey() !== this.renderedScopeKey) this.refreshView();
+    };
+    this.registerEvent(this.app.workspace.on("file-open", refreshScope));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", refreshScope));
+
     this.registerEvent(
       this.app.vault.on("create", (file) => {
         if (!(file instanceof TFile) || file.extension !== "md") return;
@@ -1094,7 +1126,11 @@ export default class ChecklistPlugin extends Plugin {
     }));
 
     this.registerEvent(this.app.vault.on("delete", (file) => {
-      if (file instanceof TFile) { this.index.delete(file.path); this.refreshView(); }
+      if (file instanceof TFile) {
+        this.index.delete(file.path);
+        this.lastProcessedContent.delete(file.path);
+        this.refreshView();
+      }
     }));
 
     this.registerEvent(this.app.vault.on("rename", async (file, oldPath) => {
@@ -1160,11 +1196,18 @@ export default class ChecklistPlugin extends Plugin {
 
   getAllTodos(): TodoItem[] {
     const todos: TodoItem[] = [];
+    const activeNote = this.getScopeNote();
+    const scope = this.settings.todoScope;
+    this.renderedScopeKey = this.getScopeKey();
+    if (scope !== "vault" && !activeNote) return todos;
+    const folder = activeNote?.path.slice(0, activeNote.path.lastIndexOf("/") + 1) ?? "";
     // Resolve the date format once if any date-based filter is active.
     const needsFormat = this.settings.dateNotesOnly || this.settings.hideFutureDateNotes;
     const format = needsFormat ? this.getDateNotesFormat() : null;
     const exclude = parseExcludeRules(this.settings.excludeRules);
     for (const [path, items] of this.index) {
+      if (scope === "note" && path !== activeNote?.path) continue;
+      if (scope === "folder" && !path.startsWith(folder)) continue;
       if (isNoteExcluded(path, exclude)) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
@@ -1192,12 +1235,33 @@ export default class ChecklistPlugin extends Plugin {
     return todos;
   }
 
+  private getScopeNote(): TFile | null {
+    const active = this.app.workspace.getActiveFile();
+    const file = this.scopeNote ?? (active?.extension === "md" ? active : null);
+    return file && this.app.vault.getAbstractFileByPath(file.path) === file ? file : null;
+  }
+
+  // Identifies what the current scope shows: the note path, or the folder prefix.
+  private getScopeKey(): string {
+    const scope = this.settings.todoScope;
+    const note = this.getScopeNote();
+    if (scope === "vault" || !note) return scope;
+    const path = scope === "note" ? note.path : note.path.slice(0, note.path.lastIndexOf("/") + 1);
+    return `${scope}\0${path}`;
+  }
+
   getEmptyMessage(): string {
+    if (this.settings.todoScope !== "vault" && !this.getScopeNote()) {
+      return "Open a Markdown note to show its todos.";
+    }
     const hasFilters =
       this.settings.dateNotesOnly ||
       this.settings.hideFutureDateNotes ||
       hasExcludeRules(parseExcludeRules(this.settings.excludeRules));
-    return hasFilters ? "No open todos match the current filters." : "No open todos.";
+    if (hasFilters) return "No open todos match the current filters.";
+    if (this.settings.todoScope === "note") return "No open todos in the current note.";
+    if (this.settings.todoScope === "folder") return "No open todos in the current folder or its subfolders.";
+    return "No open todos.";
   }
 
   private getDailyNotesPlugin(): DailyNotesPluginInstance | null {
@@ -1665,6 +1729,11 @@ class ChecklistSettingTab extends PluginSettingTab {
         heading: "Filters",
         items: [
           {
+            name: "Todo scope",
+            desc: "Which todos to show. Note and folder scopes follow the active note.",
+            control: { type: "dropdown", key: "todoScope", options: SCOPE_OPTIONS },
+          },
+          {
             name: "Date notes only",
             desc: "Show todos only from notes whose filename matches your Daily Notes date format.",
             control: { type: "toggle", key: "dateNotesOnly" },
@@ -1740,12 +1809,12 @@ class ChecklistSettingTab extends PluginSettingTab {
       }
       case "dropdown": {
         const { options } = control;
-        const key = control.key as "sortMode";
+        const key = control.key as "sortMode" | "todoScope";
         setting.addDropdown((dropdown) =>
           dropdown
             .addOptions(options)
             .setValue(settings[key])
-            .onChange((value) => this.plugin.updateSetting(key, value as SortMode))
+            .onChange((value) => this.plugin.updateSetting(key, value as SortMode | TodoScope))
         );
         break;
       }

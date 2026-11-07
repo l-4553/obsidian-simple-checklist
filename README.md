@@ -5,7 +5,7 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 
 ## Features
 
-- **Vault-wide todo list** — scans every Markdown file and surfaces unchecked `- [ ]` items in one place
+- **Vault-wide todo list** — scans every Markdown file and surfaces unchecked `- [ ]` items in one place, or only those from the current note or folder
 - **Grouped by file** — todos are grouped under their source file; click a group title to open that note
 - **Nested indentation** — sub-todos are indented in the panel to mirror their nesting in the note
 - **Click to navigate** — click a todo to jump directly to that line in the source file
@@ -27,6 +27,7 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 
 ### Filters
 
+- **Todo scope** — **Entire vault** (default), **Current note**, or **Current folder and subfolders**. Note and folder scopes follow the active note; date and exclusion filters still apply within the scope.
 - **Date notes only** — show todos only from notes whose filename matches your Daily Notes date format (formats with folders, e.g. `YYYY/MM/YYYY-MM-DD`, are supported)
 - **Hide future date notes** — hide todos from date notes dated after today, so planning-ahead notes stay out of the panel
 - **Exclude todos** — hide todos from the panel, one rule per line; the shape of a line decides what it matches:
