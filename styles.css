@@ -1,20 +1,3 @@
-.checklist-scope {
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.checklist-scope select {
-  width: 100%;
-  max-width: 100%;
-}
-
-.checklist-scope-context {
-  margin-top: 6px;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  overflow-wrap: anywhere;
-}
-
 .checklist-container {
   padding: 8px 0;
   display: flex;
