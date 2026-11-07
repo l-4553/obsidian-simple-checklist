@@ -1,11 +1,11 @@
 # Simple Checklist
 <img width="1080" height="813" alt="showcasing" src="https://github.com/user-attachments/assets/9102635f-ad51-4fee-80bc-d0918cdea42a" />
 
-An Obsidian plugin that collects all open `- [ ]` todos across your vault into a single side panel.
+An Obsidian plugin that collects open `- [ ]` todos into a single side panel, scoped to the current note, its folder and subfolders, or the entire vault.
 
 ## Features
 
-- **Vault-wide todo list** — scans every Markdown file and surfaces unchecked `- [ ]` items in one place
+- **Choose the todo scope** — show unchecked `- [ ]` items from the current note, its folder and subfolders, or the entire vault using the dropdown above the checklist
 - **Grouped by file** — todos are grouped under their source file; click a group title to open that note
 - **Nested indentation** — sub-todos are indented in the panel to mirror their nesting in the note
 - **Click to navigate** — click a todo to jump directly to that line in the source file
@@ -27,6 +27,7 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 
 ### Filters
 
+- **Todo scope** — choose **Entire vault** (the default), **Current note**, or **Current folder and subfolders**. Note and folder scopes follow the active Markdown note and stay in place while the checklist has focus. The note or folder path appears below the dropdown. With no active Markdown note, these scopes show a prompt to open one. For a note at the vault root, folder scope includes the whole vault. Existing date and exclusion filters still apply within the chosen scope. The choice is saved across restarts and shared by open checklist panels.
 - **Date notes only** — show todos only from notes whose filename matches your Daily Notes date format (formats with folders, e.g. `YYYY/MM/YYYY-MM-DD`, are supported)
 - **Hide future date notes** — hide todos from date notes dated after today, so planning-ahead notes stay out of the panel
 - **Exclude todos** — hide todos from the panel, one rule per line; the shape of a line decides what it matches:
@@ -53,3 +54,15 @@ Open the checklist panel via:
 Search for **Simple Checklist** in Settings → Community plugins → Browse.
 
 Or add via [community.obsidian.md/plugins/simple-checklist](https://community.obsidian.md/plugins/simple-checklist)
+
+## Development
+
+```sh
+npm ci
+npm test
+npm run lint
+npm run typecheck
+npm run build
+```
+
+The tests cover scope filtering, active-note changes, settings persistence, existing filters, and file/folder moves. The type check disables imported TypeScript helpers because esbuild handles the build without `tslib`.

@@ -1,5 +1,6 @@
 import {
   App,
+  DropdownComponent,
   Editor,
   ItemView,
   MarkdownView,
@@ -33,6 +34,17 @@ interface TodoItem {
 }
 
 type SortMode = "recent" | "oldest" | "alpha" | "alpha-desc";
+type TodoScope = "vault" | "note" | "folder";
+
+const SCOPE_OPTIONS: Record<TodoScope, string> = {
+  vault: "Entire vault",
+  note: "Current note",
+  folder: "Current folder and subfolders",
+};
+
+function isTodoScope(value: unknown): value is TodoScope {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(SCOPE_OPTIONS, value);
+}
 
 function compareNoteGroups(a: TFile, b: TFile, mode: SortMode): number {
   switch (mode) {
@@ -49,6 +61,7 @@ function compareNoteGroups(a: TFile, b: TFile, mode: SortMode): number {
 }
 
 interface ChecklistSettings {
+  todoScope: TodoScope;
   sortMode: SortMode;
   // Show only the todos, without note titles and dividers ("bare" mode).
   hideNoteTitles: boolean;
@@ -68,6 +81,7 @@ type BooleanSettingKey = {
 }[EditableSettingKey];
 
 const DEFAULT_SETTINGS: ChecklistSettings = {
+  todoScope: "vault",
   sortMode: "recent",
   hideNoteTitles: false,
   dateNotesOnly: false,
@@ -607,6 +621,8 @@ class ChecklistView extends ItemView {
   // Stable display order — only updated on first load or when new file paths appear
   private displayOrder: string[] = [];
   private titleToggleEl: HTMLElement | null = null;
+  private scopeDropdown: DropdownComponent | null = null;
+  private scopeContextEl: HTMLElement | null = null;
   // Note of the todo being dragged from this view. dataTransfer contents can't be
   // read during dragover, so this decides whether a drop target is allowed.
   private dragSourcePath: string | null = null;
@@ -640,6 +656,16 @@ class ChecklistView extends ItemView {
   getDisplayText(): string { return "Checklist"; }
   getIcon(): string { return "check-square"; }
   onOpen(): Promise<void> {
+    const container = this.contentEl;
+    const toolbar = container.createDiv({ cls: "checklist-scope" });
+    this.scopeDropdown = new DropdownComponent(toolbar)
+      .addOptions(SCOPE_OPTIONS)
+      .setValue(this.plugin.settings.todoScope)
+      .onChange((value) => {
+        if (isTodoScope(value)) void this.plugin.updateSetting("todoScope", value);
+      });
+    this.scopeDropdown.selectEl.setAttr("aria-label", "Todo scope");
+    this.scopeContextEl = toolbar.createDiv({ cls: "checklist-scope-context" });
     this.titleToggleEl = this.addAction("list", "Hide note titles", () => {
       void this.plugin.setHideNoteTitles(!this.plugin.settings.hideNoteTitles);
     });
@@ -678,7 +704,11 @@ class ChecklistView extends ItemView {
   }
 
   render(): void {
-    const container = this.containerEl.children[1] as HTMLElement;
+    const container = this.contentEl;
+    this.scopeDropdown?.setValue(this.plugin.settings.todoScope);
+    const context = this.plugin.getScopeContext();
+    this.scopeContextEl?.setText(context);
+    this.scopeContextEl?.setAttr("title", context);
     const todos = this.plugin.getAllTodos();
 
     // ── Empty state ──────────────────────────────────────────────────────────
@@ -1033,6 +1063,7 @@ export default class ChecklistPlugin extends Plugin {
     const stored = (await this.loadData()) as (Partial<ChecklistSettings> & { excludeKeywords?: string }) | null;
     const { excludeKeywords, ...rest } = stored ?? {};
     this.settings = { ...DEFAULT_SETTINGS, ...rest };
+    if (!isTodoScope(this.settings.todoScope)) this.settings.todoScope = "vault";
     // Up to 1.10.x, exclusions were a comma-separated keyword list. Carry them
     // over as one keyword per line.
     if (rest.excludeRules === undefined && excludeKeywords) {
@@ -1065,13 +1096,22 @@ export default class ChecklistPlugin extends Plugin {
       this.refreshView();
     });
 
+    // getActiveFile retains the most recently active file while the sidebar
+    // has focus. Both events cover switching tabs and opening in the same tab.
+    const refreshScope = () => {
+      if (this.settings.todoScope !== "vault") this.refreshView();
+    };
+    this.registerEvent(this.app.workspace.on("file-open", refreshScope));
+    this.registerEvent(this.app.workspace.on("active-leaf-change", refreshScope));
+
     this.registerEvent(
-      this.app.vault.on("create", (file) => {
+      this.app.vault.on("create", async (file) => {
         if (!(file instanceof TFile) || file.extension !== "md") return;
-        if (!this.settings.movePastTodosToToday) return;
-        if (this.suppressRollOverOnCreate) return;
-        if (!this.isTodayDateNote(file)) return;
-        void this.migratePastTodosToToday(file);
+        const shouldRollOver = this.settings.movePastTodosToToday &&
+          !this.suppressRollOverOnCreate && this.isTodayDateNote(file);
+        await this.updateIndex(file);
+        this.refreshView();
+        if (shouldRollOver) void this.migratePastTodosToToday(file);
       })
     );
 
@@ -1098,11 +1138,23 @@ export default class ChecklistPlugin extends Plugin {
     }));
 
     this.registerEvent(this.app.vault.on("rename", async (file, oldPath) => {
-      if (file instanceof TFile && file.extension === "md") {
+      if (file instanceof TFile) {
         this.index.delete(oldPath);
-        await this.updateIndex(file);
-        this.refreshView();
+        this.lastProcessedContent.delete(oldPath);
+        if (file.extension === "md") await this.updateIndex(file);
+      } else {
+        // Folder moves emit a rename for the folder, not each child note.
+        for (const path of this.index.keys()) {
+          if (path.startsWith(`${oldPath}/`)) this.index.delete(path);
+        }
+        for (const path of this.lastProcessedContent.keys()) {
+          if (path.startsWith(`${oldPath}/`)) this.lastProcessedContent.delete(path);
+        }
+        await Promise.all(this.app.vault.getMarkdownFiles()
+          .filter((note) => note.path.startsWith(`${file.path}/`))
+          .map((note) => this.updateIndex(note)));
       }
+      this.refreshView();
     }));
   }
 
@@ -1160,11 +1212,17 @@ export default class ChecklistPlugin extends Plugin {
 
   getAllTodos(): TodoItem[] {
     const todos: TodoItem[] = [];
+    const activeNote = this.getScopeNote();
+    const scope = this.settings.todoScope;
+    if (scope !== "vault" && !activeNote) return todos;
+    const folder = activeNote?.path.slice(0, activeNote.path.lastIndexOf("/") + 1) ?? "";
     // Resolve the date format once if any date-based filter is active.
     const needsFormat = this.settings.dateNotesOnly || this.settings.hideFutureDateNotes;
     const format = needsFormat ? this.getDateNotesFormat() : null;
     const exclude = parseExcludeRules(this.settings.excludeRules);
     for (const [path, items] of this.index) {
+      if (scope === "note" && path !== activeNote?.path) continue;
+      if (scope === "folder" && !path.startsWith(folder)) continue;
       if (isNoteExcluded(path, exclude)) continue;
       const file = this.app.vault.getAbstractFileByPath(path);
       if (!(file instanceof TFile)) continue;
@@ -1192,12 +1250,32 @@ export default class ChecklistPlugin extends Plugin {
     return todos;
   }
 
+  private getScopeNote(): TFile | null {
+    const file = this.app.workspace.getActiveFile();
+    return file?.extension === "md" && this.app.vault.getAbstractFileByPath(file.path) === file ? file : null;
+  }
+
+  getScopeContext(): string {
+    if (this.settings.todoScope === "vault") return "All notes";
+    const note = this.getScopeNote();
+    if (!note) return "Open a Markdown note to use this scope.";
+    if (this.settings.todoScope === "note") return note.path;
+    const slash = note.path.lastIndexOf("/");
+    return slash < 0 ? "/ (vault root, including subfolders)" : `${note.path.slice(0, slash)}/`;
+  }
+
   getEmptyMessage(): string {
+    if (this.settings.todoScope !== "vault" && !this.getScopeNote()) {
+      return "Open a Markdown note to show its todos.";
+    }
     const hasFilters =
       this.settings.dateNotesOnly ||
       this.settings.hideFutureDateNotes ||
       hasExcludeRules(parseExcludeRules(this.settings.excludeRules));
-    return hasFilters ? "No open todos match the current filters." : "No open todos.";
+    if (hasFilters) return "No open todos match the current filters.";
+    if (this.settings.todoScope === "note") return "No open todos in the current note.";
+    if (this.settings.todoScope === "folder") return "No open todos in the current folder or its subfolders.";
+    return "No open todos.";
   }
 
   private getDailyNotesPlugin(): DailyNotesPluginInstance | null {
@@ -1665,6 +1743,12 @@ class ChecklistSettingTab extends PluginSettingTab {
         heading: "Filters",
         items: [
           {
+            name: "Todo scope",
+            desc: "Show todos from the entire vault, the current note, or its folder and subfolders. " +
+              "Note and folder scopes follow the active Markdown note. Also available above the checklist.",
+            control: { type: "dropdown", key: "todoScope", options: SCOPE_OPTIONS },
+          },
+          {
             name: "Date notes only",
             desc: "Show todos only from notes whose filename matches your Daily Notes date format.",
             control: { type: "toggle", key: "dateNotesOnly" },
@@ -1740,12 +1824,12 @@ class ChecklistSettingTab extends PluginSettingTab {
       }
       case "dropdown": {
         const { options } = control;
-        const key = control.key as "sortMode";
+        const key = control.key as "sortMode" | "todoScope";
         setting.addDropdown((dropdown) =>
           dropdown
             .addOptions(options)
             .setValue(settings[key])
-            .onChange((value) => this.plugin.updateSetting(key, value as SortMode))
+            .onChange((value) => this.plugin.updateSetting(key, value as SortMode | TodoScope))
         );
         break;
       }
