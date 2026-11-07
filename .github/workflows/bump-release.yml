@@ -2,7 +2,7 @@ name: Bump & Release
 
 # Runs automatically on every push to main (i.e. every merged PR) and can
 # also be started by hand (Actions -> "Bump & Release" -> Run workflow) to
-# pick a different bump level. It bumps the version (minor by default),
+# pick a different bump level. It bumps the version (patch by default),
 # commits "Release X.Y.Z", tags, builds, and publishes the GitHub release
 # with the built artifacts.
 #
@@ -20,10 +20,10 @@ on:
         description: Version bump level
         type: choice
         options:
-          - minor
           - patch
+          - minor
           - major
-        default: minor
+        default: patch
 
 # Merges landing close together release one after another, never in parallel.
 concurrency:
@@ -54,11 +54,11 @@ jobs:
       - name: Bump version (package.json + manifest.json)
         id: bump
         env:
-          LEVEL: ${{ inputs.level || 'minor' }}
+          LEVEL: ${{ inputs.level || 'patch' }}
         run: |
           VERSION=$(node -e '
             const fs = require("fs");
-            const l = process.env.LEVEL || "minor";
+            const l = process.env.LEVEL || "patch";
             let [a, b, c] = require("./package.json").version.split(".").map(Number);
             if (l === "major") { a++; b = 0; c = 0; }
             else if (l === "minor") { b++; c = 0; }
