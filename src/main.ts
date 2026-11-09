@@ -515,6 +515,17 @@ function findHighlightMarkers(text: string, tokens: TodoTextToken[]): Set<number
   return markers;
 }
 
+// Color emoji that Obsidian (1.14+) treats as part of the opening "==" of a
+// highlight, e.g. ==🟢text==. Only the two UTF-16 units right after "==" count.
+const HIGHLIGHT_COLORS: Record<string, string> = {
+  "🔴": "red", "🟥": "red",
+  "🟠": "orange", "🟧": "orange",
+  "🟡": "yellow", "🟨": "yellow",
+  "🟢": "green", "🟩": "green",
+  "🔵": "blue", "🟦": "blue",
+  "🟣": "purple", "🟪": "purple",
+};
+
 // Whether the todo text contains at least one rendered ==highlight==.
 function hasHighlight(text: string): boolean {
   return findHighlightMarkers(text, tokenizeTodoText(text)).size > 0;
@@ -536,10 +547,17 @@ function renderTodoText(
         for (let i = token.start; i < token.end; i++) {
           if (!markers.has(i)) continue;
           if (i > last) target.appendText(text.slice(last, i));
-          target = target === container
-            ? container.createEl("mark", { cls: "checklist-inline-highlight" })
-            : container;
           last = i + 2;
+          if (target === container) {
+            target = container.createEl("mark", { cls: "checklist-inline-highlight" });
+            const color: string | undefined = HIGHLIGHT_COLORS[text.slice(last, last + 2)];
+            if (color) {
+              target.setAttr("data-highlight", color);
+              last += 2;
+            }
+          } else {
+            target = container;
+          }
           i++;
         }
         if (token.end > last) target.appendText(text.slice(last, token.end));
