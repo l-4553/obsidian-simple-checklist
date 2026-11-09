@@ -27,6 +27,11 @@
   cursor: pointer;
 }
 
+/* Note titles match the size of the heading labels below them. */
+.checklist-container.has-headings .checklist-group-title {
+  font-size: var(--font-ui-small);
+}
+
 .checklist-group-title:hover {
   color: var(--text-normal);
   text-decoration: underline;
@@ -75,6 +80,20 @@
 
 .checklist-container.is-bare .checklist-group {
   margin-bottom: 0;
+}
+
+.checklist-heading {
+  padding: 6px 12px 2px;
+  font-size: var(--font-ui-small);
+  font-weight: 500;
+  color: var(--text-muted);
+  cursor: pointer;
+  word-break: break-word;
+}
+
+.checklist-heading:hover {
+  color: var(--text-normal);
+  text-decoration: underline;
 }
 
 .checklist-item {
