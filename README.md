@@ -42,6 +42,10 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
   | `Projects/Games backlog.md` | that note |
   | `/weekly planner/` | notes whose path matches the regular expression (case-insensitive); an invalid one is flagged in the settings and the box isn't saved until it's fixed |
 
+### Checking off
+
+- **Check off nested todos** — when you check off a todo in the panel, also check off the open todos indented beneath it
+
 ### Daily notes
 
 - **Roll over open todos** — when today's daily note is created, move open todos from past daily notes into it (callout headers are carried along). Turning the setting on runs this right away, creating today's note if needed
