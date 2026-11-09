@@ -9,7 +9,7 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 - **Check off without leaving your note** — tick a todo in the panel and it's marked `- [x]` in the file, with a small confetti burst
 - **Priority by `!`** — todos ending in `!` float to the top of their note, with `!!` above `!` above none; todos containing a `==highlight==` come next, above plain todos
 - **Drag and drop** — reorder todos or move them into another note by dragging; an accent-colored line shows exactly where the todo will land (above or below a todo), and its nested sub-todos are carried along
-- **Daily note rollover** — optionally move open todos from past daily notes into today's note when it's created
+- **Daily note rollover** — optionally move open todos from past daily notes into today's note, when it's created or as soon as you turn the setting on
 - **Focused filters** — limit the panel to date notes, hide future-dated notes, or exclude todos by word, folder, note or regular expression
 - **Click to navigate** — click a todo to jump directly to that line in the source file
 - **Pin notes to the top** — pin a note group so it stays above the rest, regardless of sort order
@@ -35,14 +35,14 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 
   | Line | Hides |
   |---|---|
-  | `define` | todos containing the word (case-insensitive) |
+  | `define` | todos containing the text, even inside a longer word like `undefined` (case-insensitive) |
   | `Templates/` | every note in the folder and its subfolders |
   | `Projects/Games backlog.md` | that note |
   | `/weekly planner/` | notes whose path matches the regular expression (case-insensitive); an invalid one is flagged in the settings and the box isn't saved until it's fixed |
 
 ### Daily notes
 
-- **Roll over open todos** — when today's daily note is created, move open todos from past daily notes into it (callout headers are carried along)
+- **Roll over open todos** — when today's daily note is created, move open todos from past daily notes into it (callout headers are carried along). Turning the setting on runs this right away, creating today's note if needed
 
 ## Usage
 
