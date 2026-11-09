@@ -5,17 +5,18 @@ An Obsidian plugin that collects all open `- [ ]` todos across your vault into a
 
 ## Features
 
-- **Vault-wide todo list** — scans every Markdown file and surfaces unchecked `- [ ]` items in one place, or only those from the current note or folder
+- **Every open todo in one panel** — scans every Markdown file and surfaces unchecked `- [ ]` items in one place, or only those from the current note or folder
+- **Check off without leaving your note** — tick a todo in the panel and it's marked `- [x]` in the file, with a small confetti burst
+- **Priority by `!`** — todos ending in `!` float to the top of their note, with `!!` above `!` above none; todos containing a `==highlight==` come next, above plain todos
+- **Drag and drop** — reorder todos or move them into another note by dragging; an accent-colored line shows exactly where the todo will land (above or below a todo), and its nested sub-todos are carried along
+- **Daily note rollover** — optionally move open todos from past daily notes into today's note when it's created
+- **Focused filters** — limit the panel to date notes, hide future-dated notes, or exclude todos by word, folder, note or regular expression
+- **Click to navigate** — click a todo to jump directly to that line in the source file
+- **Pin notes to the top** — pin a note group so it stays above the rest, regardless of sort order
+- **Inline rendering** — wiki links (`[[Note]]`), Markdown links, inline code (`` `code` ``) and highlights (`==text==`) inside todo text are rendered inline, including Obsidian's highlight colors (`==🟢text==`)
+- **Delete from the panel** — remove a todo from the file entirely using the trash icon
 - **Grouped by file** — todos are grouped under their source file; click a group title to open that note
 - **Nested indentation** — sub-todos are indented in the panel to mirror their nesting in the note
-- **Click to navigate** — click a todo to jump directly to that line in the source file
-- **Complete from the panel** — check off a todo; it gets marked `- [x]` in the file, with a small confetti burst
-- **Delete from the panel** — remove a todo from the file entirely using the trash icon
-- **Pin notes to the top** — pin a note group so it stays above the rest, regardless of sort order
-- **Drag and drop** — reorder todos or move them into another note by dragging; an accent-colored line shows exactly where the todo will land (above or below a todo), and its nested sub-todos are carried along
-- **Callout support** — todos written inside callouts (`> - [ ]`) are picked up too, with their callout header preserved
-- **Inline rendering** — wiki links (`[[Note]]`), Markdown links, inline code (`` `code` ``) and highlights (`==text==`) inside todo text are rendered inline
-- **Priority by `!`** — todos ending in `!` float to the top of their note, with `!!` above `!` above none; todos containing a `==highlight==` come next, above plain todos
 - **Live updates** — the panel refreshes automatically as you edit your notes
 
 ## Settings
