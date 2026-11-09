@@ -162,8 +162,34 @@
 }
 
 .checklist-inline-highlight {
-  background-color: var(--highlight-background, var(--text-highlight-bg));
+  background-color: var(--highlight-background, var(--text-highlight-bg, rgba(255, 208, 0, 0.4)));
   color: var(--text-normal);
+}
+
+/* Obsidian 1.14+ provides these colors; older versions and themes fall back to
+   the base palette, then to a fixed color. */
+.checklist-inline-highlight[data-highlight="red"] {
+  background-color: var(--highlight-background-red, rgba(var(--color-red-rgb, 233, 49, 71), 0.3));
+}
+
+.checklist-inline-highlight[data-highlight="orange"] {
+  background-color: var(--highlight-background-orange, rgba(var(--color-orange-rgb, 236, 117, 0), 0.3));
+}
+
+.checklist-inline-highlight[data-highlight="yellow"] {
+  background-color: var(--highlight-background-yellow, rgba(var(--color-yellow-rgb, 224, 172, 0), 0.3));
+}
+
+.checklist-inline-highlight[data-highlight="green"] {
+  background-color: var(--highlight-background-green, rgba(var(--color-green-rgb, 8, 185, 78), 0.3));
+}
+
+.checklist-inline-highlight[data-highlight="blue"] {
+  background-color: var(--highlight-background-blue, rgba(var(--color-blue-rgb, 8, 109, 221), 0.3));
+}
+
+.checklist-inline-highlight[data-highlight="purple"] {
+  background-color: var(--highlight-background-purple, rgba(var(--color-purple-rgb, 120, 82, 238), 0.3));
 }
 
 .checklist-inline-link {
