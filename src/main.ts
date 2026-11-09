@@ -23,6 +23,11 @@ const typedMoment = moment as unknown as typeof import("moment");
 
 const VIEW_TYPE = "checklist";
 
+interface TodoHeading {
+  text: string;
+  line: number;
+}
+
 interface TodoItem {
   file: TFile;
   lineIndex: number;
@@ -30,6 +35,8 @@ interface TodoItem {
   // Nesting level mirrored from the source note (0 = top level). Optional so that
   // transient TodoItems built outside getAllTodos default to unindented.
   depth?: number;
+  // Nearest heading above the todo in its note, if there is one.
+  heading?: TodoHeading;
 }
 
 type SortMode = "recent" | "oldest" | "alpha" | "alpha-desc";
@@ -64,6 +71,8 @@ interface ChecklistSettings {
   sortMode: SortMode;
   // Show only the todos, without note titles and dividers ("bare" mode).
   hideNoteTitles: boolean;
+  // Group each note's todos under the nearest heading above them.
+  showHeadings: boolean;
   dateNotesOnly: boolean;
   hideFutureDateNotes: boolean;
   movePastTodosToToday: boolean;
@@ -83,6 +92,7 @@ const DEFAULT_SETTINGS: ChecklistSettings = {
   todoScope: "vault",
   sortMode: "recent",
   hideNoteTitles: false,
+  showHeadings: false,
   dateNotesOnly: false,
   hideFutureDateNotes: false,
   movePastTodosToToday: false,
@@ -209,11 +219,27 @@ function sortTodosByPriority(items: TodoItem[]): TodoItem[] {
   return order(0, items.length);
 }
 
+// Priority-sorts each run of consecutive todos under the same heading on its
+// own, so every heading's todos stay together below a single label.
+function sortTodosWithinHeadings(items: TodoItem[]): TodoItem[] {
+  const out: TodoItem[] = [];
+  let start = 0;
+  for (let i = 1; i <= items.length; i++) {
+    if (i === items.length || items[i].heading?.text !== items[start].heading?.text) {
+      out.push(...sortTodosByPriority(items.slice(start, i)));
+      start = i;
+    }
+  }
+  return out;
+}
+
 // Todo lines, with optional callout prefix(es): "  > > - [ ] text" matches.
 // TODO_OPEN_RE captures the trailing text; the *_PREFIX variants are tests only.
 const TODO_OPEN_RE = /^\s*(?:>\s*)*-\s\[ \]\s(.+)/;
 const TODO_OPEN_PREFIX = /^\s*(?:>\s*)*-\s\[ \]/;
 const TODO_DONE_PREFIX = /^\s*(?:>\s*)*-\s\[x\]/;
+// Any number of "#" and a space at the very start of a line, captures the title.
+const HEADING_RE = /^#+ +(\S.*)/;
 const CALLOUT_OPEN_RE = /^\s*((?:>\s*)*)\[!([a-zA-Z0-9-]+)\]([+-])?/;
 
 // Visual width of a todo line's list indentation, in columns (tab = 4). Blockquote
@@ -735,6 +761,7 @@ class ChecklistView extends ItemView {
       this.wrapper = container.createDiv({ cls: "checklist-container" });
     }
     this.wrapper.classList.toggle("is-bare", this.plugin.settings.hideNoteTitles);
+    this.wrapper.classList.toggle("has-headings", this.plugin.settings.showHeadings);
     this.updateTitleToggle();
 
     // ── Build grouped items ───────────────────────────────────────────────────
@@ -808,7 +835,7 @@ class ChecklistView extends ItemView {
     }
 
     // ── Remove old dividers (stateless, re-inserted below) ───────────────────
-    this.wrapper.querySelectorAll(".checklist-divider").forEach(d => d.remove());
+    this.wrapper.querySelectorAll(".checklist-divider, .checklist-heading").forEach(d => d.remove());
 
     // ── Reconcile groups + items in desired order ─────────────────────────────
     for (let gi = 0; gi < orderedPaths.length; gi++) {
@@ -846,7 +873,12 @@ class ChecklistView extends ItemView {
 
       // Reconcile items using text-based keys
       const fileOccurrences = new Map<string, number>();
+      let currentHeading: string | undefined;
       for (const todo of items) {
+        if (this.plugin.settings.showHeadings && todo.heading?.text !== currentHeading) {
+          currentHeading = todo.heading?.text;
+          if (todo.heading) this.buildHeading(groupData.group, todo.file, todo.heading);
+        }
         const base = `${filePath}\0${todo.text}`;
         const occ = fileOccurrences.get(base) ?? 0;
         fileOccurrences.set(base, occ + 1);
@@ -892,7 +924,10 @@ class ChecklistView extends ItemView {
     const rows = Array.from(groupEl.querySelectorAll<HTMLElement>(":scope > .checklist-item"));
     if (rows.length === 0) return null;
     const node = e.targetNode;
-    const over = node?.instanceOf(HTMLElement) ? node.closest<HTMLElement>(".checklist-item") : null;
+    const el = node?.instanceOf(HTMLElement) ? node : null;
+    // A heading label counts as the top of the row below it.
+    const over = el?.closest<HTMLElement>(".checklist-item")
+      ?? el?.closest(".checklist-heading")?.nextElementSibling as HTMLElement | null | undefined;
     let index = over ? rows.indexOf(over) : -1;
     let after = true;
     if (index < 0) {
@@ -962,6 +997,19 @@ class ChecklistView extends ItemView {
         this.plugin.suppressRefresh = false;
         this.plugin.refreshView();
       });
+    });
+  }
+
+  private buildHeading(groupEl: HTMLElement, file: TFile, heading: TodoHeading): void {
+    const el = groupEl.createDiv({ cls: "checklist-heading" });
+    renderTodoText(el, heading.text, file.path, (target, subpath, source) => {
+      void this.plugin.app.workspace.openLinkText(target + subpath, source, false);
+    });
+    el.addEventListener("click", (e: MouseEvent) => {
+      const target = e.targetNode;
+      if (!target?.instanceOf(HTMLElement) || !target.classList.contains("checklist-inline-link")) {
+        void this.plugin.navigateToLine(file, heading.line);
+      }
     });
   }
 
@@ -1045,7 +1093,7 @@ class ChecklistView extends ItemView {
 }
 
 export default class ChecklistPlugin extends Plugin {
-  private index: Map<string, Array<{ lineIndex: number; text: string; indent: number }>> = new Map();
+  private index: Map<string, Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading }>> = new Map();
   suppressRefresh = false;
   settings: ChecklistSettings = { ...DEFAULT_SETTINGS };
   private writeQueue: Promise<void> = Promise.resolve();
@@ -1171,10 +1219,13 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   private indexContent(filePath: string, content: string): void {
-    const todos: Array<{ lineIndex: number; text: string; indent: number }> = [];
+    const todos: Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading }> = [];
+    let heading: TodoHeading | undefined;
     content.split("\n").forEach((line, i) => {
+      const headingMatch = line.match(HEADING_RE);
+      if (headingMatch) heading = { text: headingMatch[1].trimEnd(), line: i };
       const m = line.match(TODO_OPEN_RE);
-      if (m) todos.push({ lineIndex: i, text: m[1], indent: listIndentWidth(line) });
+      if (m) todos.push({ lineIndex: i, text: m[1], indent: listIndentWidth(line), heading });
     });
     if (todos.length > 0) this.index.set(filePath, todos);
     else this.index.delete(filePath);
@@ -1242,13 +1293,13 @@ export default class ChecklistPlugin extends Plugin {
         const depth = stack.length;
         stack.push(item.indent);
         if (isTodoExcluded(item.text, exclude)) continue;
-        noteTodos.push({ file, lineIndex: item.lineIndex, text: item.text, depth });
+        noteTodos.push({ file, lineIndex: item.lineIndex, text: item.text, depth, heading: item.heading });
       }
       // Priority-sort within the note, per indentation level, keeping each
       // item's nested children with it. The view groups by note path and
       // orders the note groups itself, so todos only need to be contiguous and
       // correctly ordered within their own note here.
-      todos.push(...sortTodosByPriority(noteTodos));
+      todos.push(...(this.settings.showHeadings ? sortTodosWithinHeadings(noteTodos) : sortTodosByPriority(noteTodos)));
     }
     return todos;
   }
@@ -1611,7 +1662,7 @@ export default class ChecklistPlugin extends Plugin {
     await this.saveSettings();
   }
 
-  async navigateToFile(file: TFile): Promise<void> {
+  async navigateToFile(file: TFile): Promise<WorkspaceLeaf> {
     const leaf =
       this.app.workspace.getLeavesOfType("markdown").find(
         (l) => (l.view as MarkdownView).file?.path === file.path
@@ -1620,18 +1671,23 @@ export default class ChecklistPlugin extends Plugin {
       this.app.workspace.getLeaf(false);
 
     await leaf.openFile(file, { active: true });
+    return leaf;
+  }
+
+  private revealLine(editor: Editor, line: number): void {
+    const pos = { line, ch: editor.getLine(line).length };
+    editor.setCursor(pos);
+    editor.scrollIntoView({ from: pos, to: pos }, true);
+  }
+
+  async navigateToLine(file: TFile, line: number): Promise<void> {
+    const leaf = await this.navigateToFile(file);
+    const editor: Editor = (leaf.view as MarkdownView).editor;
+    this.revealLine(editor, Math.min(line, editor.lastLine()));
   }
 
   async navigateToTodo(todo: TodoItem): Promise<void> {
-    const leaf =
-      this.app.workspace.getLeavesOfType("markdown").find(
-        (l) => (l.view as MarkdownView).file?.path === todo.file.path
-      ) ??
-      this.app.workspace.getLeavesOfType("markdown")[0] ??
-      this.app.workspace.getLeaf(false);
-
-    await leaf.openFile(todo.file, { active: true });
-
+    const leaf = await this.navigateToFile(todo.file);
     const view = leaf.view as MarkdownView;
     const editor: Editor = view.editor;
 
@@ -1643,10 +1699,7 @@ export default class ChecklistPlugin extends Plugin {
     );
     if (lineIdx < 0) lineIdx = Math.min(todo.lineIndex, lines.length - 1);
 
-    const lineLength = editor.getLine(lineIdx).length;
-    const pos = { line: lineIdx, ch: lineLength };
-    editor.setCursor(pos);
-    editor.scrollIntoView({ from: pos, to: pos }, true);
+    this.revealLine(editor, lineIdx);
   }
 
   refreshView(): void {
@@ -1666,7 +1719,7 @@ export default class ChecklistPlugin extends Plugin {
   async updateSetting<K extends EditableSettingKey>(key: K, value: ChecklistSettings[K]): Promise<void> {
     this.settings[key] = value;
     await this.saveSettings();
-    if (key === "hideNoteTitles") this.refreshView();
+    if (key === "hideNoteTitles" || key === "showHeadings") this.refreshView();
     else if (key === "movePastTodosToToday") {
       if (value) await this.runRollOverToToday();
     } else this.applySettingsToViews();
@@ -1739,6 +1792,13 @@ class ChecklistSettingTab extends PluginSettingTab {
               "Show only the todos, without note titles. Dragging then only reorders todos within their own note. " +
               "Also available as a button in the panel header.",
             control: { type: "toggle", key: "hideNoteTitles" },
+          },
+          {
+            name: "Show headings",
+            desc:
+              "Group each note's todos under the nearest heading above them. " +
+              "Priority sorting then applies within each heading instead of the whole note.",
+            control: { type: "toggle", key: "showHeadings" },
           },
         ],
       },

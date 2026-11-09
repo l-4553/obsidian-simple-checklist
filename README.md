@@ -16,6 +16,7 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 - **Inline rendering** — wiki links (`[[Note]]`), Markdown links, inline code (`` `code` ``) and highlights (`==text==`) inside todo text are rendered inline, including Obsidian's highlight colors (`==🟢text==`)
 - **Delete from the panel** — remove a todo from the file entirely using the trash icon
 - **Grouped by file** — todos are grouped under their source file; click a group title to open that note
+- **Grouped by heading** — optionally show each todo under the nearest heading above it in the note; click a heading to jump to it
 - **Nested indentation** — sub-todos are indented in the panel to mirror their nesting in the note
 - **Live updates** — the panel refreshes automatically as you edit your notes
 
@@ -25,6 +26,7 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 
 - **Note sort order** — order groups by most/least recently modified, or note name (A–Z / Z–A)
 - **Hide note titles** — show only the todos, without note titles; dragging then only reorders todos within their own note. Also toggled from the panel header button or the **Toggle note titles in Checklist panel** command
+- **Show headings** — group each note's todos under the nearest heading above them (any line starting with one or more `#` and a space); click a heading to jump to it. Priority sorting then applies within each heading instead of the whole note
 
 ### Filters
 
