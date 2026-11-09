@@ -3,6 +3,8 @@
 
 An Obsidian plugin that collects all open `- [ ]` todos across your vault into a single side panel.
 
+This plugin is actively maintained.
+
 ## Features
 
 - **Every open todo in one panel** — scans every Markdown file and surfaces unchecked `- [ ]` items in one place, or only those from the current note or folder
