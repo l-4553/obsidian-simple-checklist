@@ -67,6 +67,8 @@ interface ChecklistSettings {
   dateNotesOnly: boolean;
   hideFutureDateNotes: boolean;
   movePastTodosToToday: boolean;
+  // Checking off a todo in the panel also checks off its nested todos.
+  completeNestedTodos: boolean;
   // Exclude rules, one per line: keyword, "Folder/", "Note.md" or "/regex/".
   excludeRules: string;
   // Note paths pinned to the top of the panel, in pin order (most-recent last).
@@ -86,6 +88,7 @@ const DEFAULT_SETTINGS: ChecklistSettings = {
   dateNotesOnly: false,
   hideFutureDateNotes: false,
   movePastTodosToToday: false,
+  completeNestedTodos: false,
   excludeRules: "",
   pinnedPaths: [],
 };
@@ -1426,9 +1429,12 @@ export default class ChecklistPlugin extends Plugin {
         const lines = editor.getValue().split("\n");
         const idx = this.findTodoLine(lines, todo);
         if (idx >= 0 && lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) {
-          const line = lines[idx];
-          const col = line.indexOf("- [ ]");
-          editor.replaceRange("- [x]", { line: idx, ch: col }, { line: idx, ch: col + 5 });
+          // One transaction, so a single undo restores the whole subtree.
+          const changes = this.linesToComplete(lines, idx).map((line) => {
+            const ch = lines[line].indexOf("- [ ]");
+            return { from: { line, ch }, to: { line, ch: ch + 5 }, text: "- [x]" };
+          });
+          editor.transaction({ changes });
           this.lastModifiedFile = todo.file;
         }
       } else {
@@ -1436,24 +1442,38 @@ export default class ChecklistPlugin extends Plugin {
         const lines = content.split("\n");
         const idx = this.findTodoLine(lines, todo);
         if (idx >= 0 && lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) {
-          const originalLine = lines[idx];
-          lines[idx] = originalLine.replace("- [ ]", "- [x]");
+          const completed = this.linesToComplete(lines, idx).map((line) => {
+            const text = lines[line].match(TODO_OPEN_RE)?.[1] ?? todo.text;
+            lines[line] = lines[line].replace("- [ ]", "- [x]");
+            return { line, text };
+          });
           await this.app.vault.modify(todo.file, lines.join("\n"));
           this.lastModifiedFile = todo.file;
           this.undoStack.push(async () => {
             const current = await this.app.vault.read(todo.file);
             const cur = current.split("\n");
-            const i = cur.findIndex((l, li) =>
-              li >= idx - 2 && li <= idx + 2 && l.includes("- [x]") && l.includes(todo.text)
-            );
-            if (i >= 0) {
-              cur[i] = cur[i].replace("- [x]", "- [ ]");
-              await this.app.vault.modify(todo.file, cur.join("\n"));
+            let changed = false;
+            for (const { line, text } of completed) {
+              const i = cur.findIndex((l, li) =>
+                li >= line - 2 && li <= line + 2 && l.includes("- [x]") && l.includes(text)
+              );
+              if (i >= 0) {
+                cur[i] = cur[i].replace("- [x]", "- [ ]");
+                changed = true;
+              }
             }
+            if (changed) await this.app.vault.modify(todo.file, cur.join("\n"));
           });
         }
       }
     });
+  }
+
+  // The lines checked off when completing the todo at `idx`: the todo itself
+  // and, if completeNestedTodos is on, the open todos nested under it.
+  private linesToComplete(lines: string[], idx: number): number[] {
+    if (!this.settings.completeNestedTodos) return [idx];
+    return [idx, ...collectDescendantLines(lines, idx).filter((i) => TODO_OPEN_RE.test(lines[i]))];
   }
 
   // Where a todo dropped next to `anchor` goes: before the anchor's own line,
@@ -1775,6 +1795,17 @@ class ChecklistSettingTab extends PluginSettingTab {
                 if (invalid.length > 0) return `Invalid regular expression: ${invalid.join(", ")}`;
               },
             },
+          },
+        ],
+      },
+      {
+        type: "group",
+        heading: "Checking off",
+        items: [
+          {
+            name: "Check off nested todos",
+            desc: "When you check off a todo in the panel, also check off the open todos indented beneath it.",
+            control: { type: "toggle", key: "completeNestedTodos" },
           },
         ],
       },

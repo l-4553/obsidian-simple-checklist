@@ -3,5 +3,6 @@ main.js
 
 # Local-only release infrastructure and agent configuration
 scripts/release.sh
+scripts/deploy-vault.sh
 CLAUDE.md
 .claude/
