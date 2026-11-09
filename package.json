@@ -1,6 +1,6 @@
 {
   "name": "obsidian-simple-checklist",
-  "version": "1.10.14",
+  "version": "1.10.15",
   "description": "Obsidian plugin: side panel todo list",
   "main": "main.js",
   "scripts": {
