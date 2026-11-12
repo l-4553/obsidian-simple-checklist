@@ -1,11 +1,14 @@
 import {
   App,
   Editor,
+  finishRenderMath,
   ItemView,
+  loadMathJax,
   MarkdownView,
   moment,
   Plugin,
   PluginSettingTab,
+  renderMath,
   Setting,
   SettingControl,
   SettingDefinitionGroup,
@@ -23,6 +26,10 @@ const typedMoment = moment as unknown as typeof import("moment");
 
 const VIEW_TYPE = "checklist";
 
+// How long a checked-off todo stays in the panel, so it can be unchecked again.
+// Keep in sync with the checklist-done-fade animation in styles.css.
+const DONE_LINGER_MS = 5000;
+
 interface TodoHeading {
   text: string;
   line: number;
@@ -37,6 +44,8 @@ interface TodoItem {
   depth?: number;
   // Nearest heading above the todo in its note, if there is one.
   heading?: TodoHeading;
+  // Just checked off: shown greyed out until it fades from the panel (see DONE_LINGER_MS).
+  done?: boolean;
 }
 
 type SortMode = "recent" | "oldest" | "alpha" | "alpha-desc";
@@ -243,6 +252,7 @@ function sortTodosWithinHeadings(items: TodoItem[]): TodoItem[] {
 // TODO_OPEN_RE captures the trailing text; the *_PREFIX variants are tests only.
 const TODO_OPEN_RE = /^\s*(?:>\s*)*-\s\[ \]\s(.+)/;
 const TODO_OPEN_PREFIX = /^\s*(?:>\s*)*-\s\[ \]/;
+const TODO_DONE_RE = /^\s*(?:>\s*)*-\s\[x\]\s(.+)/;
 const TODO_DONE_PREFIX = /^\s*(?:>\s*)*-\s\[x\]/;
 // Any number of "#" and a space at the very start of a line, captures the title.
 const HEADING_RE = /^#+ +(\S.*)/;
@@ -424,13 +434,16 @@ interface AppWithInternalPlugins {
 }
 
 // Matches [[target]], [[target|alias]], [[target#heading]], [[target#heading|alias]],
-// the "[label](" start of markdown links, bare http(s) URLs, and inline code `code`.
-// ==Highlights== are found afterwards in the plain text between these (see findHighlightMarkers).
+// the "[label](" start of markdown links, bare http(s) URLs, inline code `code`,
+// and LaTeX math $$display$$ / $inline$. Like in Obsidian, inline math must not
+// start or end with a space and the closing "$" must not be followed by a digit,
+// so "costs $5 and $10" stays text; "\$" is a literal dollar sign.
+// **Bold**, *italic*, ~~strikethrough~~ and ==highlights== are found afterwards in the plain text between these (see findStyleMarkers).
 // Markdown link labels may contain one level of nested brackets; the link target
 // is found by findLinkTargetEnd so parentheses inside URLs are counted.
 // Bare URLs may contain balanced parentheses ("…/Foo_(bar)") but don't swallow
 // a closing ")" around them ("(see https://x.y)").
-const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[((?:[^[\]]|\[[^[\]]*\])+)\]\(|(https?:\/\/(?:[^\s()<>]|\([^\s()<>]*\))+)|`([^`]+)`/g;
+const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[((?:[^[\]]|\[[^[\]]*\])+)\]\(|(https?:\/\/(?:[^\s()<>]|\([^\s()<>]*\))+)|`([^`]+)`|(?<!\\)\$\$((?:\\.|[^$\\])+?)\$\$|(?<![\\$])\$(?![\s$])((?:\\.|[^$\\])+?)(?<!\s)\$(?!\d)/g;
 
 // Index of the ")" that closes a markdown link target starting at `start` (just
 // after its "("), counting nested parentheses so URLs like "…?q=(a)&id=1" stay
@@ -468,9 +481,10 @@ type TodoTextToken =
   | { kind: "wikilink"; target: string; subpath: string; label: string }
   | { kind: "link"; target: string; label: string }
   | { kind: "url"; url: string }
-  | { kind: "code"; code: string };
+  | { kind: "code"; code: string }
+  | { kind: "math"; source: string; display: boolean };
 
-// Splits todo text into plain-text ranges and links / URLs / inline code.
+// Splits todo text into plain-text ranges and links / URLs / inline code / math.
 function tokenizeTodoText(text: string): TodoTextToken[] {
   const tokens: TodoTextToken[] = [];
   const pushText = (start: number, end: number) => {
@@ -506,8 +520,12 @@ function tokenizeTodoText(text: string): TodoTextToken[] {
       tokens.push({ kind: "link", target, label: m[4] });
     } else if (m[5] !== undefined) {
       tokens.push({ kind: "url", url: m[5] });
-    } else {
+    } else if (m[6] !== undefined) {
       tokens.push({ kind: "code", code: m[6] });
+    } else if (m[7] !== undefined) {
+      tokens.push({ kind: "math", source: m[7].trim(), display: true });
+    } else {
+      tokens.push({ kind: "math", source: m[8], display: false });
     }
     last = end;
   }
@@ -515,33 +533,75 @@ function tokenizeTodoText(text: string): TodoTextToken[] {
   return tokens;
 }
 
-// Start offsets of the "==" markers that open/close ==highlights==, looking only
-// at plain-text ranges (never inside links or inline code). The markers have to
-// touch the highlighted text: an opening "==" must be followed by a non-space
-// character and a closing "==" preceded by one, so "a == b" stays as is. Runs of
-// three or more "=" and backslash-escaped "\==" are never markers. An opener
-// without a matching closer stays literal text.
-function findHighlightMarkers(text: string, tokens: TodoTextToken[]): Set<number> {
-  const markers = new Set<number>();
-  let open = -1;
+type InlineStyle = "em" | "strong" | "del" | "mark";
+
+// A delimiter that opens or closes an inline style, e.g. the "**" of **bold**.
+interface StyleMarker {
+  len: number;
+  open: boolean;
+  style: InlineStyle;
+}
+
+// Finds the delimiters of *italic* / _italic_, **bold** / __bold__, ***both***,
+// ~~strikethrough~~ and ==highlights==, keyed by their start offset, looking only
+// at plain-text ranges (never inside links or inline code). Delimiters have to
+// touch the styled text: an opener must be followed by a non-space character and
+// a closer preceded by one, so "a * b" or "a == b" stay as they are. "_" also
+// doesn't count inside words (snake_case). "~~" and "==" must be exactly two
+// characters, "*"/"_" runs at most three. Backslash-escaped delimiters are
+// literal, and so is an opener without a matching closer. Styles nest; closing
+// a style drops the unclosed openers inside it.
+function findStyleMarkers(text: string, tokens: TodoTextToken[]): Map<number, StyleMarker> {
+  const markers = new Map<number, StyleMarker>();
+  const stack: { pos: number; len: number; ch: string; style: InlineStyle }[] = [];
+  const isWordChar = (c: string) => /[\p{L}\p{N}]/u.test(c);
   for (const token of tokens) {
     if (token.kind !== "text") continue;
-    for (let i = token.start; i + 1 < token.end; i++) {
-      if (text[i] !== "=" || text[i + 1] !== "=") continue;
+    for (let i = token.start; i < token.end; i++) {
+      const ch = text[i];
+      if (ch !== "*" && ch !== "_" && ch !== "~" && ch !== "=") continue;
+      let runEnd = i;
+      while (runEnd < token.end && text[runEnd] === ch) runEnd++;
+      const len = runEnd - i;
       const before = text[i - 1] ?? "";
-      const after = text[i + 2] ?? "";
-      if (before === "=" || after === "=" || before === "\\") {
-        while (text[i + 1] === "=") i++;
-        continue;
+      const after = text[runEnd] ?? "";
+      const pos = i;
+      i = runEnd - 1;
+      if (before === "\\") continue;
+      if (ch === "~" || ch === "=" ? len !== 2 : len > 3) continue;
+      let canOpen = after !== "" && !/\s/.test(after);
+      let canClose = before !== "" && !/\s/.test(before);
+      if (ch === "_") {
+        canOpen &&= !isWordChar(before);
+        canClose &&= !isWordChar(after);
       }
-      if (open === -1) {
-        if (after !== "" && !/\s/.test(after)) open = i;
-      } else if (before !== "" && !/\s/.test(before)) {
-        markers.add(open);
-        markers.add(i);
-        open = -1;
+
+      if (canClose) {
+        // Close the innermost open styles of this delimiter, e.g. "***" closes
+        // an open "*" and then an open "**".
+        let at = pos;
+        let left = len;
+        while (left > 0) {
+          let idx = stack.length - 1;
+          while (idx >= 0 && stack[idx].ch !== ch) idx--;
+          if (idx === -1 || stack[idx].len > left) break;
+          const opener = stack[idx];
+          stack.length = idx;
+          markers.set(opener.pos, { len: opener.len, open: true, style: opener.style });
+          markers.set(at, { len: opener.len, open: false, style: opener.style });
+          at += opener.len;
+          left -= opener.len;
+        }
+        if (left < len) continue;
       }
-      i++;
+      if (canOpen) {
+        if (ch === "~") stack.push({ pos, len, ch, style: "del" });
+        else if (ch === "=") stack.push({ pos, len, ch, style: "mark" });
+        else if (len === 3) {
+          stack.push({ pos, len: 2, ch, style: "strong" });
+          stack.push({ pos: pos + 2, len: 1, ch, style: "em" });
+        } else stack.push({ pos, len, ch, style: len === 2 ? "strong" : "em" });
+      }
     }
   }
   return markers;
@@ -558,9 +618,19 @@ const HIGHLIGHT_COLORS: Record<string, string> = {
   "🟣": "purple", "🟪": "purple",
 };
 
+const STYLE_CLASSES: Record<InlineStyle, string> = {
+  em: "checklist-inline-italic",
+  strong: "checklist-inline-bold",
+  del: "checklist-inline-strikethrough",
+  mark: "checklist-inline-highlight",
+};
+
 // Whether the todo text contains at least one rendered ==highlight==.
 function hasHighlight(text: string): boolean {
-  return findHighlightMarkers(text, tokenizeTodoText(text)).size > 0;
+  for (const marker of findStyleMarkers(text, tokenizeTodoText(text)).values()) {
+    if (marker.style === "mark") return true;
+  }
+  return false;
 }
 
 function renderTodoText(
@@ -570,27 +640,34 @@ function renderTodoText(
   openLink: (target: string, subpath: string, source: string) => void
 ): void {
   const tokens = tokenizeTodoText(text);
-  const markers = findHighlightMarkers(text, tokens);
+  const markers = findStyleMarkers(text, tokens);
+  const open: HTMLElement[] = [];
   let target = container;
+  let hasMath = false;
   for (const token of tokens) {
     switch (token.kind) {
       case "text": {
         let last = token.start;
         for (let i = token.start; i < token.end; i++) {
-          if (!markers.has(i)) continue;
+          const marker = markers.get(i);
+          if (!marker) continue;
           if (i > last) target.appendText(text.slice(last, i));
-          last = i + 2;
-          if (target === container) {
-            target = container.createEl("mark", { cls: "checklist-inline-highlight" });
-            const color: string | undefined = HIGHLIGHT_COLORS[text.slice(last, last + 2)];
-            if (color) {
-              target.setAttr("data-highlight", color);
-              last += 2;
+          last = i + marker.len;
+          if (marker.open) {
+            target = target.createEl(marker.style, { cls: STYLE_CLASSES[marker.style] });
+            open.push(target);
+            if (marker.style === "mark") {
+              const color: string | undefined = HIGHLIGHT_COLORS[text.slice(last, last + 2)];
+              if (color) {
+                target.setAttr("data-highlight", color);
+                last += 2;
+              }
             }
           } else {
-            target = container;
+            open.pop();
+            target = open[open.length - 1] ?? container;
           }
-          i++;
+          i = last - 1;
         }
         if (token.end > last) target.appendText(text.slice(last, token.end));
         break;
@@ -614,8 +691,20 @@ function renderTodoText(
       case "code":
         target.createEl("code", { cls: "checklist-inline-code", text: token.code });
         break;
+      case "math": {
+        const math = target.createSpan({ cls: "checklist-inline-math" });
+        try {
+          math.appendChild(renderMath(token.source, token.display));
+          hasMath = true;
+        } catch {
+          // MathJax not available (yet): show the source instead.
+          math.setText(token.display ? `$$${token.source}$$` : `$${token.source}$`);
+        }
+        break;
+      }
     }
   }
+  if (hasMath) void finishRenderMath();
 }
 
 
@@ -728,19 +817,14 @@ class ChecklistView extends ItemView {
   }
   onClose(): Promise<void> { return Promise.resolve(); }
 
+  // Confetti for todos checked off outside the panel's checkbox. The rows stay,
+  // shown as done, until the todo fades from the panel.
   triggerExternalCompletion(filePath: string, completedTexts: Set<string>): void {
     for (const [key, row] of this.rowEls) {
       const parts = key.split("\0");
-      if (parts[0] === filePath && completedTexts.has(parts[1])) {
+      if (parts[0] === filePath && completedTexts.has(parts[1]) && !row.classList.contains("is-done")) {
         const checkbox = row.querySelector<HTMLElement>(".checklist-checkbox");
         if (checkbox) spawnConfetti(checkbox);
-        const groupEl = row.parentElement;
-        row.remove();
-        this.rowEls.delete(key);
-        if (groupEl && !groupEl.querySelector(".checklist-item")) {
-          groupEl.remove();
-          this.groupEls.delete(filePath);
-        }
       }
     }
   }
@@ -907,6 +991,8 @@ class ChecklistView extends ItemView {
         }
         // Set on every reconcile so re-indenting a todo in the note updates the row.
         row.style.setProperty("--checklist-depth", String(todo.depth ?? 0));
+        row.classList.toggle("is-done", !!todo.done);
+        row.draggable = !todo.done;
         row.classList.toggle("is-folded", headingFolded);
         this.rowTodos.set(row, todo);
         groupData.group.appendChild(row);
@@ -1047,20 +1133,20 @@ class ChecklistView extends ItemView {
     const row = createDiv({ cls: "checklist-item" });
 
     const checkbox = row.createDiv({ cls: "checklist-checkbox" });
-    let completing = false;
+    let toggling = false;
+    // Checking off keeps the row, greyed out, until it fades from the panel;
+    // clicking it again in the meantime unchecks the todo.
     checkbox.addEventListener("click", (e: MouseEvent) => {
       e.stopPropagation();
-      if (completing) return;
-      completing = true;
-      spawnConfetti(checkbox);
+      if (toggling) return;
+      toggling = true;
+      const current = this.rowTodos.get(row) ?? todo;
+      row.classList.toggle("is-done", !current.done);
+      if (!current.done) spawnConfetti(checkbox);
       this.plugin.suppressRefresh = true;
-      void this.plugin.completeTodo(todo).then(() => {
-        row.remove();
-        this.rowEls.delete(key);
-        if (!groupEl.querySelector(".checklist-item")) {
-          groupEl.remove();
-          this.groupEls.delete(todo.file.path);
-        }
+      const action = current.done ? this.plugin.reopenTodo(current) : this.plugin.completeTodo(current);
+      void action.then(() => {
+        toggling = false;
         this.plugin.suppressRefresh = false;
         this.plugin.refreshView();
       });
@@ -1073,7 +1159,7 @@ class ChecklistView extends ItemView {
     text.addEventListener("click", (e: MouseEvent) => {
       const target = e.targetNode;
       if (!target?.instanceOf(HTMLElement) || !target.classList.contains("checklist-inline-link")) {
-        void this.plugin.navigateToTodo(todo);
+        void this.plugin.navigateToTodo(this.rowTodos.get(row) ?? todo);
       }
     });
 
@@ -1096,6 +1182,9 @@ class ChecklistView extends ItemView {
         this.plugin.refreshView();
       });
     });
+
+    row.addEventListener("mouseenter", () => this.plugin.setHoveredTodo(this.rowTodos.get(row) ?? todo));
+    row.addEventListener("mouseleave", () => this.plugin.setHoveredTodo(null));
 
     row.setAttribute("draggable", "true");
     row.addEventListener("dragstart", (e: DragEvent) => {
@@ -1122,8 +1211,19 @@ class ChecklistView extends ItemView {
   }
 }
 
+// Countdown until a done todo leaves the panel. `timer` is null while the
+// todo is hovered.
+interface DoneTimer {
+  timer: number | null;
+}
+
 export default class ChecklistPlugin extends Plugin {
-  private index: Map<string, Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading }>> = new Map();
+  private index: Map<string, Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading; done?: boolean }>> = new Map();
+  // Recently checked-off todo texts per note, with the timer that drops them
+  // from the panel. Their "- [x]" lines are indexed as done until then.
+  private recentlyDone = new Map<string, Map<string, DoneTimer>>();
+  // Todo under the mouse in the panel; a done one doesn't fade while hovered.
+  private hoveredTodo: { path: string; text: string } | null = null;
   suppressRefresh = false;
   settings: ChecklistSettings = { ...DEFAULT_SETTINGS };
   private writeQueue: Promise<void> = Promise.resolve();
@@ -1165,6 +1265,7 @@ export default class ChecklistPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    void loadMathJax();
     this.registerView(VIEW_TYPE, (leaf) => new ChecklistView(leaf, this));
     this.addRibbonIcon("check-square", "Open Checklist", () => { void this.activateView(); });
     this.addCommand({ id: "open-checklist", name: "Open Checklist panel", callback: () => { void this.activateView(); } });
@@ -1174,6 +1275,9 @@ export default class ChecklistPlugin extends Plugin {
       callback: () => { void this.setHideNoteTitles(!this.settings.hideNoteTitles); },
     });
     this.addSettingTab(new ChecklistSettingTab(this.app, this));
+    this.register(() => {
+      for (const path of [...this.recentlyDone.keys()]) this.forgetDone(path);
+    });
 
     this.app.workspace.onLayoutReady(async () => {
       await this.buildIndex();
@@ -1224,6 +1328,7 @@ export default class ChecklistPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("delete", (file) => {
       if (file instanceof TFile) {
         this.index.delete(file.path);
+        this.forgetDone(file.path);
         this.lastProcessedContent.delete(file.path);
         this.refreshView();
       }
@@ -1232,6 +1337,7 @@ export default class ChecklistPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("rename", async (file, oldPath) => {
       if (file instanceof TFile && file.extension === "md") {
         this.index.delete(oldPath);
+        this.forgetDone(oldPath);
         await this.updateIndex(file);
         this.refreshView();
       }
@@ -1249,23 +1355,95 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   private indexContent(filePath: string, content: string): void {
-    const todos: Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading }> = [];
+    const todos: Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading; done?: boolean }> = [];
+    const recentlyDone = this.recentlyDone.get(filePath);
     let heading: TodoHeading | undefined;
     content.split("\n").forEach((line, i) => {
       const headingMatch = line.match(HEADING_RE);
       if (headingMatch) heading = { text: headingMatch[1].trimEnd(), line: i };
       const m = line.match(TODO_OPEN_RE);
       if (m) todos.push({ lineIndex: i, text: m[1], indent: listIndentWidth(line), heading });
+      const d = recentlyDone && line.match(TODO_DONE_RE);
+      if (d && recentlyDone.has(d[1])) {
+        todos.push({ lineIndex: i, text: d[1], indent: listIndentWidth(line), heading, done: true });
+      }
     });
     if (todos.length > 0) this.index.set(filePath, todos);
     else this.index.delete(filePath);
   }
 
+  // Keeps just checked-off todos in the panel for DONE_LINGER_MS (restarting
+  // the timer for ones already there). Call indexContent afterwards.
+  private markDone(filePath: string, texts: Iterable<string>): void {
+    let entries = this.recentlyDone.get(filePath);
+    if (!entries) this.recentlyDone.set(filePath, (entries = new Map<string, DoneTimer>()));
+    for (const text of texts) {
+      const old = entries.get(text);
+      if (old?.timer != null) window.clearTimeout(old.timer);
+      const entry: DoneTimer = { timer: null };
+      entries.set(text, entry);
+      if (!this.isHovered(filePath, text)) this.startDoneTimer(filePath, text, entry);
+    }
+  }
+
+  private startDoneTimer(filePath: string, text: string, entry: DoneTimer): void {
+    entry.timer = window.setTimeout(() => {
+      this.forgetDone(filePath, [text]);
+      const items = this.index.get(filePath)?.filter((t) => !(t.done && t.text === text));
+      if (items && items.length > 0) this.index.set(filePath, items);
+      else this.index.delete(filePath);
+      this.refreshView();
+    }, DONE_LINGER_MS);
+  }
+
+  private isHovered(filePath: string, text: string): boolean {
+    return this.hoveredTodo?.path === filePath && this.hoveredTodo.text === text;
+  }
+
+  // Called by the view on mouseenter (todo) and mouseleave (null). A done todo
+  // stops fading while hovered and starts the full countdown again afterwards.
+  setHoveredTodo(todo: TodoItem | null): void {
+    const prev = this.hoveredTodo;
+    if (prev) {
+      const entry = this.recentlyDone.get(prev.path)?.get(prev.text);
+      if (entry && entry.timer === null) this.startDoneTimer(prev.path, prev.text, entry);
+    }
+    this.hoveredTodo = todo ? { path: todo.file.path, text: todo.text } : null;
+    const entry = todo && this.recentlyDone.get(todo.file.path)?.get(todo.text);
+    if (entry && entry.timer !== null) {
+      window.clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+  }
+
+  private forgetDone(filePath: string, texts?: Iterable<string>): void {
+    const entries = this.recentlyDone.get(filePath);
+    if (!entries) return;
+    for (const text of texts ?? [...entries.keys()]) {
+      const entry = entries.get(text);
+      if (entry?.timer != null) window.clearTimeout(entry.timer);
+      entries.delete(text);
+    }
+    if (entries.size === 0) this.recentlyDone.delete(filePath);
+  }
+
+  // Processes content written by the panel right away, so the view doesn't
+  // render before the editor-change/modify event updates the index.
+  private syncContent(file: TFile, content: string): void {
+    if (this.lastProcessedContent.get(file.path) !== content) this.handleContentChange(file, content);
+  }
+
   private handleContentChange(file: TFile, content: string): void {
-    const oldTodos = this.index.get(file.path) ?? [];
+    const oldTodos = (this.index.get(file.path) ?? []).filter(t => !t.done);
     this.lastProcessedContent.set(file.path, content);
     this.indexContent(file.path, content);
-    const newTexts = new Set((this.index.get(file.path) ?? []).map(t => t.text));
+    const newTexts = new Set((this.index.get(file.path) ?? []).filter(t => !t.done).map(t => t.text));
+    // Todos unchecked again no longer linger as done.
+    const reopened = [...(this.recentlyDone.get(file.path)?.keys() ?? [])].filter(t => newTexts.has(t));
+    if (reopened.length > 0) {
+      this.forgetDone(file.path, reopened);
+      this.indexContent(file.path, content);
+    }
 
     const completedTexts = new Set<string>();
     if (oldTodos.length > 0) {
@@ -1285,6 +1463,8 @@ export default class ChecklistPlugin extends Plugin {
     }
 
     if (completedTexts.size > 0) {
+      this.markDone(file.path, completedTexts);
+      this.indexContent(file.path, content);
       this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
         if (leaf.view instanceof ChecklistView) leaf.view.triggerExternalCompletion(file.path, completedTexts);
       });
@@ -1323,7 +1503,7 @@ export default class ChecklistPlugin extends Plugin {
         const depth = stack.length;
         stack.push(item.indent);
         if (isTodoExcluded(item.text, exclude)) continue;
-        noteTodos.push({ file, lineIndex: item.lineIndex, text: item.text, depth, heading: item.heading });
+        noteTodos.push({ file, lineIndex: item.lineIndex, text: item.text, depth, heading: item.heading, done: item.done });
       }
       // Priority-sort within the note, per indentation level, keeping each
       // item's nested children with it. The view groups by note path and
@@ -1449,13 +1629,15 @@ export default class ChecklistPlugin extends Plugin {
   private findTodoLine(lines: string[], todo: TodoItem): number {
     // Prefer matches near the cached line index — this disambiguates when the
     // file has multiple identical todo lines. Fall back to a full-file search
-    // when the line has shifted further than the ±2 window.
+    // when the line has shifted further than the ±2 window. A done todo is
+    // looked up among the checked-off lines.
+    const prefix = todo.done ? TODO_DONE_PREFIX : TODO_OPEN_PREFIX;
     const near = lines.findIndex((l, i) =>
       i >= todo.lineIndex - 2 && i <= todo.lineIndex + 2 &&
-      TODO_OPEN_PREFIX.test(l) && l.includes(todo.text)
+      prefix.test(l) && l.includes(todo.text)
     );
     if (near >= 0) return near;
-    return lines.findIndex(l => TODO_OPEN_PREFIX.test(l) && l.includes(todo.text));
+    return lines.findIndex(l => prefix.test(l) && l.includes(todo.text));
   }
 
   async deleteTodo(todo: TodoItem): Promise<void> {
@@ -1514,6 +1696,7 @@ export default class ChecklistPlugin extends Plugin {
           });
           editor.transaction({ changes });
           this.lastModifiedFile = todo.file;
+          this.syncContent(todo.file, editor.getValue());
         }
       } else {
         const content = await this.app.vault.read(todo.file);
@@ -1527,6 +1710,7 @@ export default class ChecklistPlugin extends Plugin {
           });
           await this.app.vault.modify(todo.file, lines.join("\n"));
           this.lastModifiedFile = todo.file;
+          this.syncContent(todo.file, lines.join("\n"));
           this.undoStack.push(async () => {
             const current = await this.app.vault.read(todo.file);
             const cur = current.split("\n");
@@ -1543,6 +1727,37 @@ export default class ChecklistPlugin extends Plugin {
             if (changed) await this.app.vault.modify(todo.file, cur.join("\n"));
           });
         }
+      }
+    });
+  }
+
+  // Unchecks a todo that is still shown as done in the panel, together with
+  // the done todos nested under it that are still shown too (checked off along
+  // with it). Cmd/Ctrl+Z undoes it in the editor.
+  async reopenTodo(todo: TodoItem): Promise<void> {
+    return this.enqueue(async () => {
+      const editor = this.getEditorForFile(todo.file);
+      const lines = editor ? editor.getValue().split("\n") : (await this.app.vault.read(todo.file)).split("\n");
+      const idx = this.findTodoLine(lines, { ...todo, done: true });
+      if (idx < 0) return;
+      const shown = this.recentlyDone.get(todo.file.path);
+      const toReopen = [idx, ...collectDescendantLines(lines, idx).filter((i) => {
+        const text = lines[i].match(TODO_DONE_RE)?.[1];
+        return text !== undefined && shown?.has(text);
+      })];
+      if (editor) {
+        editor.transaction({
+          changes: toReopen.map((line) => {
+            const ch = lines[line].indexOf("- [x]");
+            return { from: { line, ch }, to: { line, ch: ch + 5 }, text: "- [ ]" };
+          }),
+        });
+        this.lastModifiedFile = todo.file;
+        this.syncContent(todo.file, editor.getValue());
+      } else {
+        for (const line of toReopen) lines[line] = lines[line].replace("- [x]", "- [ ]");
+        await this.app.vault.modify(todo.file, lines.join("\n"));
+        this.syncContent(todo.file, lines.join("\n"));
       }
     });
   }
@@ -1647,6 +1862,7 @@ export default class ChecklistPlugin extends Plugin {
       const content = await this.app.vault.cachedRead(file);
       const lines = content.split("\n");
       for (const item of items) {
+        if (item.done) continue;
         const idx = this.findTodoLine(lines, { file, lineIndex: item.lineIndex, text: item.text });
         if (idx >= 0) {
           if (!removals.has(path)) removals.set(path, []);
@@ -1749,7 +1965,7 @@ export default class ChecklistPlugin extends Plugin {
     // Re-locate the line by matching the todo text on an open unchecked item.
     const lines = editor.getValue().split("\n");
     let lineIdx = lines.findIndex(
-      (l) => TODO_OPEN_PREFIX.test(l) && l.includes(todo.text)
+      (l) => (todo.done ? TODO_DONE_PREFIX : TODO_OPEN_PREFIX).test(l) && l.includes(todo.text)
     );
     if (lineIdx < 0) lineIdx = Math.min(todo.lineIndex, lines.length - 1);
 

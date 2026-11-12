@@ -6,7 +6,7 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 ## Features
 
 - **Every open todo in one panel** — scans every Markdown file and surfaces unchecked `- [ ]` items in one place, or only those from the current note or folder
-- **Check off without leaving your note** — tick a todo in the panel and it's marked `- [x]` in the file, with a small confetti burst
+- **Check off without leaving your note** — tick a todo in the panel and it's marked `- [x]` in the file, with a small confetti burst. Checked-off todos stay in the panel, greyed out, for 5 seconds before they fade away; click the checkbox again in that time to uncheck them
 - **Priority by `!`** — todos ending in `!` float to the top of their note, with `!!` above `!` above none; todos containing a `==highlight==` come next, above plain todos
 - **Drag and drop** — reorder todos or move them into another note by dragging; an accent-colored line shows exactly where the todo will land (above or below a todo), and its nested sub-todos are carried along
 - **Daily note rollover** — optionally move open todos from past daily notes into today's note, when it's created or as soon as you turn the setting on
@@ -14,7 +14,7 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 - **Click to navigate** — click a todo to jump directly to that line in the source file
 - **Pin notes to the top** — pin a note group so it stays above the rest, regardless of sort order
 - **Fold notes and headings** — hover a note title or heading and click the arrow on its left to fold the todos below it; click again to unfold. Folds are remembered
-- **Inline rendering** — wiki links (`[[Note]]`), Markdown links, inline code (`` `code` ``) and highlights (`==text==`) inside todo text are rendered inline, including Obsidian's highlight colors (`==🟢text==`)
+- **Inline rendering** — wiki links (`[[Note]]`), Markdown links, inline code (`` `code` ``), **bold** (`**text**`), *italic* (`*text*`), ~~strikethrough~~ (`~~text~~`), LaTeX math (`$x^2$`, `$$…$$`) and highlights (`==text==`) inside todo text are rendered inline, including Obsidian's highlight colors (`==🟢text==`)
 - **Delete from the panel** — remove a todo from the file entirely using the trash icon
 - **Grouped by file** — todos are grouped under their source file; click a group title to open that note
 - **Grouped by heading** — optionally show each todo under the nearest heading above it in the note; click a heading to jump to it

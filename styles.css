@@ -201,6 +201,51 @@
   overflow: visible;
 }
 
+/* Just checked off: greyed out and ticked, then fading from the panel. Clicking
+   the checkbox before it is gone unchecks the todo. The duration matches
+   DONE_LINGER_MS in main.ts. */
+.checklist-item.is-done {
+  animation: checklist-done-fade 5s ease-in forwards;
+}
+
+.checklist-item.is-done .checklist-text {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+.checklist-item.is-done .checklist-checkbox {
+  border-color: var(--checkbox-color, var(--interactive-accent));
+  background-color: var(--checkbox-color, var(--interactive-accent));
+}
+
+.checklist-item.is-done .checklist-checkbox::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--checkbox-marker-color, var(--background-primary));
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+
+.checklist-item.is-done .checklist-trash {
+  visibility: hidden;
+}
+
+/* Hovering resets the fade; it starts over when the mouse leaves (as does the
+   timer in main.ts). */
+.checklist-item.is-done:hover {
+  animation: none;
+  opacity: 0.6;
+}
+
+@keyframes checklist-done-fade {
+  0%, 70% { opacity: 0.6; }
+  100%    { opacity: 0; }
+}
+
 .checklist-checkbox:hover {
   border-color: var(--checkbox-color, var(--interactive-accent));
   background-color: var(--background-modifier-hover);
@@ -229,6 +274,20 @@
   background-color: var(--code-background);
   color: var(--code-normal);
   white-space: pre-wrap;
+}
+
+.checklist-inline-bold {
+  font-weight: var(--bold-weight, bold);
+  color: var(--bold-color, inherit);
+}
+
+.checklist-inline-italic {
+  font-style: italic;
+  color: var(--italic-color, inherit);
+}
+
+.checklist-inline-strikethrough {
+  text-decoration: line-through;
 }
 
 .checklist-inline-highlight {
@@ -260,6 +319,29 @@
 
 .checklist-inline-highlight[data-highlight="purple"] {
   background-color: var(--highlight-background-purple, rgba(var(--color-purple-rgb, 120, 82, 238), 0.3));
+}
+
+.checklist-inline-math mjx-container {
+  font-size: 1em;
+}
+
+/* text-decoration doesn't reach into MathJax's inline-blocks, so draw the hover
+   underline on the wrapping span. Its box follows the surrounding text's font,
+   which puts the line at about the height of the text underline next to it. */
+.checklist-text:hover .checklist-inline-math,
+.checklist-heading:hover .checklist-inline-math {
+  background: linear-gradient(currentColor, currentColor) left bottom 0.12em / 100% 1px no-repeat;
+}
+
+/* $$display$$ math is a block of its own: underline the formula there. */
+.checklist-text:hover .checklist-inline-math:has(mjx-container[display="true"]),
+.checklist-heading:hover .checklist-inline-math:has(mjx-container[display="true"]) {
+  background: none;
+}
+
+.checklist-text:hover .checklist-inline-math mjx-container[display="true"] mjx-math,
+.checklist-heading:hover .checklist-inline-math mjx-container[display="true"] mjx-math {
+  border-bottom: 1px solid currentColor;
 }
 
 .checklist-inline-link {
