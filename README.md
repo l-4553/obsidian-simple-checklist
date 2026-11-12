@@ -26,8 +26,8 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 ### Display
 
 - **Note sort order** — order groups by most/least recently modified, or note name (A–Z / Z–A)
-- **Hide note titles** — show only the todos, without note titles; dragging then only reorders todos within their own note. Also toggled from the panel header button or the **Toggle note titles in Checklist panel** command
-- **Show headings** — group each note's todos under the nearest heading above them (any line starting with one or more `#` and a space); click a heading to jump to it. Priority sorting then applies within each heading instead of the whole note
+- **Show note titles** (on by default) — group todos under their note's title. When off, only the todos are shown and dragging only reorders within a note. Also toggled from the panel header button or the **Toggle note titles in Checklist panel** command
+- **Show headings** (off by default) — group todos under the nearest heading above them; click a heading to jump to it. Priority sorting then applies per heading
 
 ### Filters
 
