@@ -91,10 +91,12 @@ interface ChecklistSettings {
   excludeRules: string;
   // Note paths pinned to the top of the panel, in pin order (most-recent last).
   pinnedPaths: string[];
+  // Folded note titles and headings in the panel (see foldKey).
+  foldedKeys: string[];
 }
 
-// Settings edited through the settings tab (pinnedPaths is managed by the panel).
-type EditableSettingKey = Exclude<keyof ChecklistSettings, "pinnedPaths">;
+// Settings edited through the settings tab (pinnedPaths and foldedKeys are managed by the panel).
+type EditableSettingKey = Exclude<keyof ChecklistSettings, "pinnedPaths" | "foldedKeys">;
 type BooleanSettingKey = {
   [K in EditableSettingKey]: ChecklistSettings[K] extends boolean ? K : never;
 }[EditableSettingKey];
@@ -110,6 +112,7 @@ const DEFAULT_SETTINGS: ChecklistSettings = {
   completeNestedTodos: false,
   excludeRules: "",
   pinnedPaths: [],
+  foldedKeys: [],
 };
 
 interface DragTodoPayload {
@@ -736,6 +739,11 @@ function spawnConfetti(originEl: HTMLElement): void {
   }
 }
 
+// Key of a foldable note title (no heading) or heading in the panel.
+function foldKey(filePath: string, heading?: string): string {
+  return heading === undefined ? filePath : `${filePath}\0${heading}`;
+}
+
 // Stable key for a todo: uses text content so it survives line-number shifts.
 // Appends a counter to handle duplicate text within the same file.
 function itemKey(filePath: string, text: string, occurrence: number): string {
@@ -886,6 +894,7 @@ class ChecklistView extends ItemView {
     }
     // ── Pinned groups float to the top, in pin order; the rest keep their order.
     const pinned = this.plugin.settings.pinnedPaths;
+    const folded = new Set(this.plugin.settings.foldedKeys);
     const orderedPaths = pinned.some(p => grouped.has(p))
       ? [
           ...pinned.filter(p => grouped.has(p)),
@@ -936,6 +945,7 @@ class ChecklistView extends ItemView {
       if (!groupData) {
         const group = createDiv({ cls: "checklist-group" });
         const header = group.createDiv({ cls: "checklist-group-header" });
+        this.buildFoldToggle(header, foldKey(filePath));
         const title = header.createDiv({ cls: "checklist-group-title", text: items[0].file.basename });
         const titleFile = items[0].file;
         title.addEventListener("click", () => { void this.plugin.navigateToFile(titleFile); });
@@ -956,15 +966,18 @@ class ChecklistView extends ItemView {
       }
 
       groupData.group.classList.toggle("is-pinned", pinned.includes(filePath));
+      groupData.group.classList.toggle("is-folded", folded.has(foldKey(filePath)));
       this.wrapper.appendChild(groupData.group);
 
       // Reconcile items using text-based keys
       const fileOccurrences = new Map<string, number>();
       let currentHeading: string | undefined;
+      let headingFolded = false;
       for (const todo of items) {
         if (this.plugin.settings.showHeadings && todo.heading?.text !== currentHeading) {
           currentHeading = todo.heading?.text;
-          if (todo.heading) this.buildHeading(groupData.group, todo.file, todo.heading);
+          headingFolded = currentHeading !== undefined && folded.has(foldKey(filePath, currentHeading));
+          if (todo.heading) this.buildHeading(groupData.group, todo.file, todo.heading, headingFolded);
         }
         const base = `${filePath}\0${todo.text}`;
         const occ = fileOccurrences.get(base) ?? 0;
@@ -980,6 +993,7 @@ class ChecklistView extends ItemView {
         row.style.setProperty("--checklist-depth", String(todo.depth ?? 0));
         row.classList.toggle("is-done", !!todo.done);
         row.draggable = !todo.done;
+        row.classList.toggle("is-folded", headingFolded);
         this.rowTodos.set(row, todo);
         groupData.group.appendChild(row);
       }
@@ -1089,8 +1103,21 @@ class ChecklistView extends ItemView {
     });
   }
 
-  private buildHeading(groupEl: HTMLElement, file: TFile, heading: TodoHeading): void {
+  // Arrow left of a note title or heading that folds the todos below it.
+  private buildFoldToggle(parent: HTMLElement, key: string): void {
+    const toggle = parent.createDiv({ cls: "checklist-fold-toggle" });
+    setIcon(toggle, "chevron-down");
+    toggle.setAttr("aria-label", "Fold");
+    toggle.addEventListener("click", (e: MouseEvent) => {
+      e.stopPropagation();
+      void this.plugin.toggleFold(key).then(() => this.render());
+    });
+  }
+
+  private buildHeading(groupEl: HTMLElement, file: TFile, heading: TodoHeading, folded: boolean): void {
     const el = groupEl.createDiv({ cls: "checklist-heading" });
+    el.classList.toggle("is-folded", folded);
+    this.buildFoldToggle(el, foldKey(file.path, heading.text));
     renderTodoText(el, heading.text, file.path, (target, subpath, source) => {
       void this.plugin.app.workspace.openLinkText(target + subpath, source, false);
     });
@@ -1889,6 +1916,13 @@ export default class ChecklistPlugin extends Plugin {
         this.refreshView();
       }
     });
+  }
+
+  async toggleFold(key: string): Promise<void> {
+    const i = this.settings.foldedKeys.indexOf(key);
+    if (i >= 0) this.settings.foldedKeys.splice(i, 1);
+    else this.settings.foldedKeys.push(key);
+    await this.saveSettings();
   }
 
   async togglePin(path: string): Promise<void> {
