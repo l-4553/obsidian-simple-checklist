@@ -225,6 +225,20 @@
   white-space: pre-wrap;
 }
 
+.checklist-inline-bold {
+  font-weight: var(--bold-weight, bold);
+  color: var(--bold-color, inherit);
+}
+
+.checklist-inline-italic {
+  font-style: italic;
+  color: var(--italic-color, inherit);
+}
+
+.checklist-inline-strikethrough {
+  text-decoration: line-through;
+}
+
 .checklist-inline-highlight {
   background-color: var(--highlight-background, var(--text-highlight-bg, rgba(255, 208, 0, 0.4)));
   color: var(--text-normal);
@@ -254,6 +268,29 @@
 
 .checklist-inline-highlight[data-highlight="purple"] {
   background-color: var(--highlight-background-purple, rgba(var(--color-purple-rgb, 120, 82, 238), 0.3));
+}
+
+.checklist-inline-math mjx-container {
+  font-size: 1em;
+}
+
+/* text-decoration doesn't reach into MathJax's inline-blocks, so draw the hover
+   underline on the wrapping span. Its box follows the surrounding text's font,
+   which puts the line at about the height of the text underline next to it. */
+.checklist-text:hover .checklist-inline-math,
+.checklist-heading:hover .checklist-inline-math {
+  background: linear-gradient(currentColor, currentColor) left bottom 0.12em / 100% 1px no-repeat;
+}
+
+/* $$display$$ math is a block of its own: underline the formula there. */
+.checklist-text:hover .checklist-inline-math:has(mjx-container[display="true"]),
+.checklist-heading:hover .checklist-inline-math:has(mjx-container[display="true"]) {
+  background: none;
+}
+
+.checklist-text:hover .checklist-inline-math mjx-container[display="true"] mjx-math,
+.checklist-heading:hover .checklist-inline-math mjx-container[display="true"] mjx-math {
+  border-bottom: 1px solid currentColor;
 }
 
 .checklist-inline-link {

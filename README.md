@@ -13,7 +13,7 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 - **Focused filters** — limit the panel to date notes, hide future-dated notes, or exclude todos by word, folder, note or regular expression
 - **Click to navigate** — click a todo to jump directly to that line in the source file
 - **Pin notes to the top** — pin a note group so it stays above the rest, regardless of sort order
-- **Inline rendering** — wiki links (`[[Note]]`), Markdown links, inline code (`` `code` ``) and highlights (`==text==`) inside todo text are rendered inline, including Obsidian's highlight colors (`==🟢text==`)
+- **Inline rendering** — wiki links (`[[Note]]`), Markdown links, inline code (`` `code` ``), **bold** (`**text**`), *italic* (`*text*`), ~~strikethrough~~ (`~~text~~`), LaTeX math (`$x^2$`, `$$…$$`) and highlights (`==text==`) inside todo text are rendered inline, including Obsidian's highlight colors (`==🟢text==`)
 - **Delete from the panel** — remove a todo from the file entirely using the trash icon
 - **Grouped by file** — todos are grouped under their source file; click a group title to open that note
 - **Grouped by heading** — optionally show each todo under the nearest heading above it in the note; click a heading to jump to it
