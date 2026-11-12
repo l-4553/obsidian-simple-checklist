@@ -23,6 +23,10 @@ const typedMoment = moment as unknown as typeof import("moment");
 
 const VIEW_TYPE = "checklist";
 
+// How long a checked-off todo stays in the panel, so it can be unchecked again.
+// Keep in sync with the checklist-done-fade animation in styles.css.
+const DONE_LINGER_MS = 5000;
+
 interface TodoHeading {
   text: string;
   line: number;
@@ -37,6 +41,8 @@ interface TodoItem {
   depth?: number;
   // Nearest heading above the todo in its note, if there is one.
   heading?: TodoHeading;
+  // Just checked off: shown greyed out until it fades from the panel (see DONE_LINGER_MS).
+  done?: boolean;
 }
 
 type SortMode = "recent" | "oldest" | "alpha" | "alpha-desc";
@@ -240,6 +246,7 @@ function sortTodosWithinHeadings(items: TodoItem[]): TodoItem[] {
 // TODO_OPEN_RE captures the trailing text; the *_PREFIX variants are tests only.
 const TODO_OPEN_RE = /^\s*(?:>\s*)*-\s\[ \]\s(.+)/;
 const TODO_OPEN_PREFIX = /^\s*(?:>\s*)*-\s\[ \]/;
+const TODO_DONE_RE = /^\s*(?:>\s*)*-\s\[x\]\s(.+)/;
 const TODO_DONE_PREFIX = /^\s*(?:>\s*)*-\s\[x\]/;
 // Any number of "#" and a space at the very start of a line, captures the title.
 const HEADING_RE = /^#+ +(\S.*)/;
@@ -720,19 +727,14 @@ class ChecklistView extends ItemView {
   }
   onClose(): Promise<void> { return Promise.resolve(); }
 
+  // Confetti for todos checked off outside the panel's checkbox. The rows stay,
+  // shown as done, until the todo fades from the panel.
   triggerExternalCompletion(filePath: string, completedTexts: Set<string>): void {
     for (const [key, row] of this.rowEls) {
       const parts = key.split("\0");
-      if (parts[0] === filePath && completedTexts.has(parts[1])) {
+      if (parts[0] === filePath && completedTexts.has(parts[1]) && !row.classList.contains("is-done")) {
         const checkbox = row.querySelector<HTMLElement>(".checklist-checkbox");
         if (checkbox) spawnConfetti(checkbox);
-        const groupEl = row.parentElement;
-        row.remove();
-        this.rowEls.delete(key);
-        if (groupEl && !groupEl.querySelector(".checklist-item")) {
-          groupEl.remove();
-          this.groupEls.delete(filePath);
-        }
       }
     }
   }
@@ -894,6 +896,8 @@ class ChecklistView extends ItemView {
         }
         // Set on every reconcile so re-indenting a todo in the note updates the row.
         row.style.setProperty("--checklist-depth", String(todo.depth ?? 0));
+        row.classList.toggle("is-done", !!todo.done);
+        row.draggable = !todo.done;
         this.rowTodos.set(row, todo);
         groupData.group.appendChild(row);
       }
@@ -1020,20 +1024,20 @@ class ChecklistView extends ItemView {
     const row = createDiv({ cls: "checklist-item" });
 
     const checkbox = row.createDiv({ cls: "checklist-checkbox" });
-    let completing = false;
+    let toggling = false;
+    // Checking off keeps the row, greyed out, until it fades from the panel;
+    // clicking it again in the meantime unchecks the todo.
     checkbox.addEventListener("click", (e: MouseEvent) => {
       e.stopPropagation();
-      if (completing) return;
-      completing = true;
-      spawnConfetti(checkbox);
+      if (toggling) return;
+      toggling = true;
+      const current = this.rowTodos.get(row) ?? todo;
+      row.classList.toggle("is-done", !current.done);
+      if (!current.done) spawnConfetti(checkbox);
       this.plugin.suppressRefresh = true;
-      void this.plugin.completeTodo(todo).then(() => {
-        row.remove();
-        this.rowEls.delete(key);
-        if (!groupEl.querySelector(".checklist-item")) {
-          groupEl.remove();
-          this.groupEls.delete(todo.file.path);
-        }
+      const action = current.done ? this.plugin.reopenTodo(current) : this.plugin.completeTodo(current);
+      void action.then(() => {
+        toggling = false;
         this.plugin.suppressRefresh = false;
         this.plugin.refreshView();
       });
@@ -1046,7 +1050,7 @@ class ChecklistView extends ItemView {
     text.addEventListener("click", (e: MouseEvent) => {
       const target = e.targetNode;
       if (!target?.instanceOf(HTMLElement) || !target.classList.contains("checklist-inline-link")) {
-        void this.plugin.navigateToTodo(todo);
+        void this.plugin.navigateToTodo(this.rowTodos.get(row) ?? todo);
       }
     });
 
@@ -1069,6 +1073,9 @@ class ChecklistView extends ItemView {
         this.plugin.refreshView();
       });
     });
+
+    row.addEventListener("mouseenter", () => this.plugin.setHoveredTodo(this.rowTodos.get(row) ?? todo));
+    row.addEventListener("mouseleave", () => this.plugin.setHoveredTodo(null));
 
     row.setAttribute("draggable", "true");
     row.addEventListener("dragstart", (e: DragEvent) => {
@@ -1095,8 +1102,19 @@ class ChecklistView extends ItemView {
   }
 }
 
+// Countdown until a done todo leaves the panel. `timer` is null while the
+// todo is hovered.
+interface DoneTimer {
+  timer: number | null;
+}
+
 export default class ChecklistPlugin extends Plugin {
-  private index: Map<string, Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading }>> = new Map();
+  private index: Map<string, Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading; done?: boolean }>> = new Map();
+  // Recently checked-off todo texts per note, with the timer that drops them
+  // from the panel. Their "- [x]" lines are indexed as done until then.
+  private recentlyDone = new Map<string, Map<string, DoneTimer>>();
+  // Todo under the mouse in the panel; a done one doesn't fade while hovered.
+  private hoveredTodo: { path: string; text: string } | null = null;
   suppressRefresh = false;
   settings: ChecklistSettings = { ...DEFAULT_SETTINGS };
   private writeQueue: Promise<void> = Promise.resolve();
@@ -1147,6 +1165,9 @@ export default class ChecklistPlugin extends Plugin {
       callback: () => { void this.setHideNoteTitles(!this.settings.hideNoteTitles); },
     });
     this.addSettingTab(new ChecklistSettingTab(this.app, this));
+    this.register(() => {
+      for (const path of [...this.recentlyDone.keys()]) this.forgetDone(path);
+    });
 
     this.app.workspace.onLayoutReady(async () => {
       await this.buildIndex();
@@ -1197,6 +1218,7 @@ export default class ChecklistPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("delete", (file) => {
       if (file instanceof TFile) {
         this.index.delete(file.path);
+        this.forgetDone(file.path);
         this.lastProcessedContent.delete(file.path);
         this.refreshView();
       }
@@ -1205,6 +1227,7 @@ export default class ChecklistPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("rename", async (file, oldPath) => {
       if (file instanceof TFile && file.extension === "md") {
         this.index.delete(oldPath);
+        this.forgetDone(oldPath);
         await this.updateIndex(file);
         this.refreshView();
       }
@@ -1222,23 +1245,95 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   private indexContent(filePath: string, content: string): void {
-    const todos: Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading }> = [];
+    const todos: Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading; done?: boolean }> = [];
+    const recentlyDone = this.recentlyDone.get(filePath);
     let heading: TodoHeading | undefined;
     content.split("\n").forEach((line, i) => {
       const headingMatch = line.match(HEADING_RE);
       if (headingMatch) heading = { text: headingMatch[1].trimEnd(), line: i };
       const m = line.match(TODO_OPEN_RE);
       if (m) todos.push({ lineIndex: i, text: m[1], indent: listIndentWidth(line), heading });
+      const d = recentlyDone && line.match(TODO_DONE_RE);
+      if (d && recentlyDone.has(d[1])) {
+        todos.push({ lineIndex: i, text: d[1], indent: listIndentWidth(line), heading, done: true });
+      }
     });
     if (todos.length > 0) this.index.set(filePath, todos);
     else this.index.delete(filePath);
   }
 
+  // Keeps just checked-off todos in the panel for DONE_LINGER_MS (restarting
+  // the timer for ones already there). Call indexContent afterwards.
+  private markDone(filePath: string, texts: Iterable<string>): void {
+    let entries = this.recentlyDone.get(filePath);
+    if (!entries) this.recentlyDone.set(filePath, (entries = new Map<string, DoneTimer>()));
+    for (const text of texts) {
+      const old = entries.get(text);
+      if (old?.timer != null) window.clearTimeout(old.timer);
+      const entry: DoneTimer = { timer: null };
+      entries.set(text, entry);
+      if (!this.isHovered(filePath, text)) this.startDoneTimer(filePath, text, entry);
+    }
+  }
+
+  private startDoneTimer(filePath: string, text: string, entry: DoneTimer): void {
+    entry.timer = window.setTimeout(() => {
+      this.forgetDone(filePath, [text]);
+      const items = this.index.get(filePath)?.filter((t) => !(t.done && t.text === text));
+      if (items && items.length > 0) this.index.set(filePath, items);
+      else this.index.delete(filePath);
+      this.refreshView();
+    }, DONE_LINGER_MS);
+  }
+
+  private isHovered(filePath: string, text: string): boolean {
+    return this.hoveredTodo?.path === filePath && this.hoveredTodo.text === text;
+  }
+
+  // Called by the view on mouseenter (todo) and mouseleave (null). A done todo
+  // stops fading while hovered and starts the full countdown again afterwards.
+  setHoveredTodo(todo: TodoItem | null): void {
+    const prev = this.hoveredTodo;
+    if (prev) {
+      const entry = this.recentlyDone.get(prev.path)?.get(prev.text);
+      if (entry && entry.timer === null) this.startDoneTimer(prev.path, prev.text, entry);
+    }
+    this.hoveredTodo = todo ? { path: todo.file.path, text: todo.text } : null;
+    const entry = todo && this.recentlyDone.get(todo.file.path)?.get(todo.text);
+    if (entry && entry.timer !== null) {
+      window.clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+  }
+
+  private forgetDone(filePath: string, texts?: Iterable<string>): void {
+    const entries = this.recentlyDone.get(filePath);
+    if (!entries) return;
+    for (const text of texts ?? [...entries.keys()]) {
+      const entry = entries.get(text);
+      if (entry?.timer != null) window.clearTimeout(entry.timer);
+      entries.delete(text);
+    }
+    if (entries.size === 0) this.recentlyDone.delete(filePath);
+  }
+
+  // Processes content written by the panel right away, so the view doesn't
+  // render before the editor-change/modify event updates the index.
+  private syncContent(file: TFile, content: string): void {
+    if (this.lastProcessedContent.get(file.path) !== content) this.handleContentChange(file, content);
+  }
+
   private handleContentChange(file: TFile, content: string): void {
-    const oldTodos = this.index.get(file.path) ?? [];
+    const oldTodos = (this.index.get(file.path) ?? []).filter(t => !t.done);
     this.lastProcessedContent.set(file.path, content);
     this.indexContent(file.path, content);
-    const newTexts = new Set((this.index.get(file.path) ?? []).map(t => t.text));
+    const newTexts = new Set((this.index.get(file.path) ?? []).filter(t => !t.done).map(t => t.text));
+    // Todos unchecked again no longer linger as done.
+    const reopened = [...(this.recentlyDone.get(file.path)?.keys() ?? [])].filter(t => newTexts.has(t));
+    if (reopened.length > 0) {
+      this.forgetDone(file.path, reopened);
+      this.indexContent(file.path, content);
+    }
 
     const completedTexts = new Set<string>();
     if (oldTodos.length > 0) {
@@ -1258,6 +1353,8 @@ export default class ChecklistPlugin extends Plugin {
     }
 
     if (completedTexts.size > 0) {
+      this.markDone(file.path, completedTexts);
+      this.indexContent(file.path, content);
       this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
         if (leaf.view instanceof ChecklistView) leaf.view.triggerExternalCompletion(file.path, completedTexts);
       });
@@ -1296,7 +1393,7 @@ export default class ChecklistPlugin extends Plugin {
         const depth = stack.length;
         stack.push(item.indent);
         if (isTodoExcluded(item.text, exclude)) continue;
-        noteTodos.push({ file, lineIndex: item.lineIndex, text: item.text, depth, heading: item.heading });
+        noteTodos.push({ file, lineIndex: item.lineIndex, text: item.text, depth, heading: item.heading, done: item.done });
       }
       // Priority-sort within the note, per indentation level, keeping each
       // item's nested children with it. The view groups by note path and
@@ -1422,13 +1519,15 @@ export default class ChecklistPlugin extends Plugin {
   private findTodoLine(lines: string[], todo: TodoItem): number {
     // Prefer matches near the cached line index — this disambiguates when the
     // file has multiple identical todo lines. Fall back to a full-file search
-    // when the line has shifted further than the ±2 window.
+    // when the line has shifted further than the ±2 window. A done todo is
+    // looked up among the checked-off lines.
+    const prefix = todo.done ? TODO_DONE_PREFIX : TODO_OPEN_PREFIX;
     const near = lines.findIndex((l, i) =>
       i >= todo.lineIndex - 2 && i <= todo.lineIndex + 2 &&
-      TODO_OPEN_PREFIX.test(l) && l.includes(todo.text)
+      prefix.test(l) && l.includes(todo.text)
     );
     if (near >= 0) return near;
-    return lines.findIndex(l => TODO_OPEN_PREFIX.test(l) && l.includes(todo.text));
+    return lines.findIndex(l => prefix.test(l) && l.includes(todo.text));
   }
 
   async deleteTodo(todo: TodoItem): Promise<void> {
@@ -1487,6 +1586,7 @@ export default class ChecklistPlugin extends Plugin {
           });
           editor.transaction({ changes });
           this.lastModifiedFile = todo.file;
+          this.syncContent(todo.file, editor.getValue());
         }
       } else {
         const content = await this.app.vault.read(todo.file);
@@ -1500,6 +1600,7 @@ export default class ChecklistPlugin extends Plugin {
           });
           await this.app.vault.modify(todo.file, lines.join("\n"));
           this.lastModifiedFile = todo.file;
+          this.syncContent(todo.file, lines.join("\n"));
           this.undoStack.push(async () => {
             const current = await this.app.vault.read(todo.file);
             const cur = current.split("\n");
@@ -1516,6 +1617,37 @@ export default class ChecklistPlugin extends Plugin {
             if (changed) await this.app.vault.modify(todo.file, cur.join("\n"));
           });
         }
+      }
+    });
+  }
+
+  // Unchecks a todo that is still shown as done in the panel, together with
+  // the done todos nested under it that are still shown too (checked off along
+  // with it). Cmd/Ctrl+Z undoes it in the editor.
+  async reopenTodo(todo: TodoItem): Promise<void> {
+    return this.enqueue(async () => {
+      const editor = this.getEditorForFile(todo.file);
+      const lines = editor ? editor.getValue().split("\n") : (await this.app.vault.read(todo.file)).split("\n");
+      const idx = this.findTodoLine(lines, { ...todo, done: true });
+      if (idx < 0) return;
+      const shown = this.recentlyDone.get(todo.file.path);
+      const toReopen = [idx, ...collectDescendantLines(lines, idx).filter((i) => {
+        const text = lines[i].match(TODO_DONE_RE)?.[1];
+        return text !== undefined && shown?.has(text);
+      })];
+      if (editor) {
+        editor.transaction({
+          changes: toReopen.map((line) => {
+            const ch = lines[line].indexOf("- [x]");
+            return { from: { line, ch }, to: { line, ch: ch + 5 }, text: "- [ ]" };
+          }),
+        });
+        this.lastModifiedFile = todo.file;
+        this.syncContent(todo.file, editor.getValue());
+      } else {
+        for (const line of toReopen) lines[line] = lines[line].replace("- [x]", "- [ ]");
+        await this.app.vault.modify(todo.file, lines.join("\n"));
+        this.syncContent(todo.file, lines.join("\n"));
       }
     });
   }
@@ -1620,6 +1752,7 @@ export default class ChecklistPlugin extends Plugin {
       const content = await this.app.vault.cachedRead(file);
       const lines = content.split("\n");
       for (const item of items) {
+        if (item.done) continue;
         const idx = this.findTodoLine(lines, { file, lineIndex: item.lineIndex, text: item.text });
         if (idx >= 0) {
           if (!removals.has(path)) removals.set(path, []);
@@ -1715,7 +1848,7 @@ export default class ChecklistPlugin extends Plugin {
     // Re-locate the line by matching the todo text on an open unchecked item.
     const lines = editor.getValue().split("\n");
     let lineIdx = lines.findIndex(
-      (l) => TODO_OPEN_PREFIX.test(l) && l.includes(todo.text)
+      (l) => (todo.done ? TODO_DONE_PREFIX : TODO_OPEN_PREFIX).test(l) && l.includes(todo.text)
     );
     if (lineIdx < 0) lineIdx = Math.min(todo.lineIndex, lines.length - 1);
 
