@@ -96,6 +96,57 @@
   text-decoration: underline;
 }
 
+/* Fold arrow in the left padding of a note title or heading: shown on hover,
+   and always (pointing right) while folded. */
+.checklist-group-header,
+.checklist-heading {
+  position: relative;
+}
+
+.checklist-fold-toggle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 4px;
+  color: var(--text-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s ease, color 0.1s ease, transform 0.1s ease;
+}
+
+.checklist-fold-toggle svg {
+  width: 12px;
+  height: 12px;
+}
+
+.checklist-group-header:hover .checklist-fold-toggle,
+.checklist-heading:hover .checklist-fold-toggle,
+.checklist-group.is-folded > .checklist-group-header .checklist-fold-toggle,
+.checklist-heading.is-folded .checklist-fold-toggle {
+  opacity: 1;
+}
+
+.checklist-fold-toggle:hover {
+  color: var(--text-normal);
+}
+
+.checklist-group.is-folded > .checklist-group-header .checklist-fold-toggle svg,
+.checklist-heading.is-folded .checklist-fold-toggle svg {
+  transform: rotate(-90deg);
+}
+
+/* Folded: hide everything below the note title, or the todos below a heading.
+   Without note titles there is nothing to unfold a note with, so it stays open. */
+.checklist-container:not(.is-bare) .checklist-group.is-folded > :not(.checklist-group-header),
+.checklist-item.is-folded {
+  display: none;
+}
+
 .checklist-item {
   display: flex;
   align-items: flex-start;
