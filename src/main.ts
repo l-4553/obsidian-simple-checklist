@@ -1,11 +1,14 @@
 import {
   App,
   Editor,
+  finishRenderMath,
   ItemView,
+  loadMathJax,
   MarkdownView,
   moment,
   Plugin,
   PluginSettingTab,
+  renderMath,
   Setting,
   SettingControl,
   SettingDefinitionGroup,
@@ -421,13 +424,16 @@ interface AppWithInternalPlugins {
 }
 
 // Matches [[target]], [[target|alias]], [[target#heading]], [[target#heading|alias]],
-// the "[label](" start of markdown links, bare http(s) URLs, and inline code `code`.
-// ==Highlights== are found afterwards in the plain text between these (see findHighlightMarkers).
+// the "[label](" start of markdown links, bare http(s) URLs, inline code `code`,
+// and LaTeX math $$display$$ / $inline$. Like in Obsidian, inline math must not
+// start or end with a space and the closing "$" must not be followed by a digit,
+// so "costs $5 and $10" stays text; "\$" is a literal dollar sign.
+// **Bold**, *italic*, ~~strikethrough~~ and ==highlights== are found afterwards in the plain text between these (see findStyleMarkers).
 // Markdown link labels may contain one level of nested brackets; the link target
 // is found by findLinkTargetEnd so parentheses inside URLs are counted.
 // Bare URLs may contain balanced parentheses ("…/Foo_(bar)") but don't swallow
 // a closing ")" around them ("(see https://x.y)").
-const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[((?:[^[\]]|\[[^[\]]*\])+)\]\(|(https?:\/\/(?:[^\s()<>]|\([^\s()<>]*\))+)|`([^`]+)`/g;
+const LINK_RE = /\[\[([^\]|#]+)(?:#([^\]|]*))?(?:\|([^\]]*))?\]\]|\[((?:[^[\]]|\[[^[\]]*\])+)\]\(|(https?:\/\/(?:[^\s()<>]|\([^\s()<>]*\))+)|`([^`]+)`|(?<!\\)\$\$((?:\\.|[^$\\])+?)\$\$|(?<![\\$])\$(?![\s$])((?:\\.|[^$\\])+?)(?<!\s)\$(?!\d)/g;
 
 // Index of the ")" that closes a markdown link target starting at `start` (just
 // after its "("), counting nested parentheses so URLs like "…?q=(a)&id=1" stay
@@ -465,9 +471,10 @@ type TodoTextToken =
   | { kind: "wikilink"; target: string; subpath: string; label: string }
   | { kind: "link"; target: string; label: string }
   | { kind: "url"; url: string }
-  | { kind: "code"; code: string };
+  | { kind: "code"; code: string }
+  | { kind: "math"; source: string; display: boolean };
 
-// Splits todo text into plain-text ranges and links / URLs / inline code.
+// Splits todo text into plain-text ranges and links / URLs / inline code / math.
 function tokenizeTodoText(text: string): TodoTextToken[] {
   const tokens: TodoTextToken[] = [];
   const pushText = (start: number, end: number) => {
@@ -503,8 +510,12 @@ function tokenizeTodoText(text: string): TodoTextToken[] {
       tokens.push({ kind: "link", target, label: m[4] });
     } else if (m[5] !== undefined) {
       tokens.push({ kind: "url", url: m[5] });
-    } else {
+    } else if (m[6] !== undefined) {
       tokens.push({ kind: "code", code: m[6] });
+    } else if (m[7] !== undefined) {
+      tokens.push({ kind: "math", source: m[7].trim(), display: true });
+    } else {
+      tokens.push({ kind: "math", source: m[8], display: false });
     }
     last = end;
   }
@@ -512,33 +523,75 @@ function tokenizeTodoText(text: string): TodoTextToken[] {
   return tokens;
 }
 
-// Start offsets of the "==" markers that open/close ==highlights==, looking only
-// at plain-text ranges (never inside links or inline code). The markers have to
-// touch the highlighted text: an opening "==" must be followed by a non-space
-// character and a closing "==" preceded by one, so "a == b" stays as is. Runs of
-// three or more "=" and backslash-escaped "\==" are never markers. An opener
-// without a matching closer stays literal text.
-function findHighlightMarkers(text: string, tokens: TodoTextToken[]): Set<number> {
-  const markers = new Set<number>();
-  let open = -1;
+type InlineStyle = "em" | "strong" | "del" | "mark";
+
+// A delimiter that opens or closes an inline style, e.g. the "**" of **bold**.
+interface StyleMarker {
+  len: number;
+  open: boolean;
+  style: InlineStyle;
+}
+
+// Finds the delimiters of *italic* / _italic_, **bold** / __bold__, ***both***,
+// ~~strikethrough~~ and ==highlights==, keyed by their start offset, looking only
+// at plain-text ranges (never inside links or inline code). Delimiters have to
+// touch the styled text: an opener must be followed by a non-space character and
+// a closer preceded by one, so "a * b" or "a == b" stay as they are. "_" also
+// doesn't count inside words (snake_case). "~~" and "==" must be exactly two
+// characters, "*"/"_" runs at most three. Backslash-escaped delimiters are
+// literal, and so is an opener without a matching closer. Styles nest; closing
+// a style drops the unclosed openers inside it.
+function findStyleMarkers(text: string, tokens: TodoTextToken[]): Map<number, StyleMarker> {
+  const markers = new Map<number, StyleMarker>();
+  const stack: { pos: number; len: number; ch: string; style: InlineStyle }[] = [];
+  const isWordChar = (c: string) => /[\p{L}\p{N}]/u.test(c);
   for (const token of tokens) {
     if (token.kind !== "text") continue;
-    for (let i = token.start; i + 1 < token.end; i++) {
-      if (text[i] !== "=" || text[i + 1] !== "=") continue;
+    for (let i = token.start; i < token.end; i++) {
+      const ch = text[i];
+      if (ch !== "*" && ch !== "_" && ch !== "~" && ch !== "=") continue;
+      let runEnd = i;
+      while (runEnd < token.end && text[runEnd] === ch) runEnd++;
+      const len = runEnd - i;
       const before = text[i - 1] ?? "";
-      const after = text[i + 2] ?? "";
-      if (before === "=" || after === "=" || before === "\\") {
-        while (text[i + 1] === "=") i++;
-        continue;
+      const after = text[runEnd] ?? "";
+      const pos = i;
+      i = runEnd - 1;
+      if (before === "\\") continue;
+      if (ch === "~" || ch === "=" ? len !== 2 : len > 3) continue;
+      let canOpen = after !== "" && !/\s/.test(after);
+      let canClose = before !== "" && !/\s/.test(before);
+      if (ch === "_") {
+        canOpen &&= !isWordChar(before);
+        canClose &&= !isWordChar(after);
       }
-      if (open === -1) {
-        if (after !== "" && !/\s/.test(after)) open = i;
-      } else if (before !== "" && !/\s/.test(before)) {
-        markers.add(open);
-        markers.add(i);
-        open = -1;
+
+      if (canClose) {
+        // Close the innermost open styles of this delimiter, e.g. "***" closes
+        // an open "*" and then an open "**".
+        let at = pos;
+        let left = len;
+        while (left > 0) {
+          let idx = stack.length - 1;
+          while (idx >= 0 && stack[idx].ch !== ch) idx--;
+          if (idx === -1 || stack[idx].len > left) break;
+          const opener = stack[idx];
+          stack.length = idx;
+          markers.set(opener.pos, { len: opener.len, open: true, style: opener.style });
+          markers.set(at, { len: opener.len, open: false, style: opener.style });
+          at += opener.len;
+          left -= opener.len;
+        }
+        if (left < len) continue;
       }
-      i++;
+      if (canOpen) {
+        if (ch === "~") stack.push({ pos, len, ch, style: "del" });
+        else if (ch === "=") stack.push({ pos, len, ch, style: "mark" });
+        else if (len === 3) {
+          stack.push({ pos, len: 2, ch, style: "strong" });
+          stack.push({ pos: pos + 2, len: 1, ch, style: "em" });
+        } else stack.push({ pos, len, ch, style: len === 2 ? "strong" : "em" });
+      }
     }
   }
   return markers;
@@ -555,9 +608,19 @@ const HIGHLIGHT_COLORS: Record<string, string> = {
   "🟣": "purple", "🟪": "purple",
 };
 
+const STYLE_CLASSES: Record<InlineStyle, string> = {
+  em: "checklist-inline-italic",
+  strong: "checklist-inline-bold",
+  del: "checklist-inline-strikethrough",
+  mark: "checklist-inline-highlight",
+};
+
 // Whether the todo text contains at least one rendered ==highlight==.
 function hasHighlight(text: string): boolean {
-  return findHighlightMarkers(text, tokenizeTodoText(text)).size > 0;
+  for (const marker of findStyleMarkers(text, tokenizeTodoText(text)).values()) {
+    if (marker.style === "mark") return true;
+  }
+  return false;
 }
 
 function renderTodoText(
@@ -567,27 +630,34 @@ function renderTodoText(
   openLink: (target: string, subpath: string, source: string) => void
 ): void {
   const tokens = tokenizeTodoText(text);
-  const markers = findHighlightMarkers(text, tokens);
+  const markers = findStyleMarkers(text, tokens);
+  const open: HTMLElement[] = [];
   let target = container;
+  let hasMath = false;
   for (const token of tokens) {
     switch (token.kind) {
       case "text": {
         let last = token.start;
         for (let i = token.start; i < token.end; i++) {
-          if (!markers.has(i)) continue;
+          const marker = markers.get(i);
+          if (!marker) continue;
           if (i > last) target.appendText(text.slice(last, i));
-          last = i + 2;
-          if (target === container) {
-            target = container.createEl("mark", { cls: "checklist-inline-highlight" });
-            const color: string | undefined = HIGHLIGHT_COLORS[text.slice(last, last + 2)];
-            if (color) {
-              target.setAttr("data-highlight", color);
-              last += 2;
+          last = i + marker.len;
+          if (marker.open) {
+            target = target.createEl(marker.style, { cls: STYLE_CLASSES[marker.style] });
+            open.push(target);
+            if (marker.style === "mark") {
+              const color: string | undefined = HIGHLIGHT_COLORS[text.slice(last, last + 2)];
+              if (color) {
+                target.setAttr("data-highlight", color);
+                last += 2;
+              }
             }
           } else {
-            target = container;
+            open.pop();
+            target = open[open.length - 1] ?? container;
           }
-          i++;
+          i = last - 1;
         }
         if (token.end > last) target.appendText(text.slice(last, token.end));
         break;
@@ -611,8 +681,20 @@ function renderTodoText(
       case "code":
         target.createEl("code", { cls: "checklist-inline-code", text: token.code });
         break;
+      case "math": {
+        const math = target.createSpan({ cls: "checklist-inline-math" });
+        try {
+          math.appendChild(renderMath(token.source, token.display));
+          hasMath = true;
+        } catch {
+          // MathJax not available (yet): show the source instead.
+          math.setText(token.display ? `$$${token.source}$$` : `$${token.source}$`);
+        }
+        break;
+      }
     }
   }
+  if (hasMath) void finishRenderMath();
 }
 
 
@@ -1138,6 +1220,7 @@ export default class ChecklistPlugin extends Plugin {
 
   async onload(): Promise<void> {
     await this.loadSettings();
+    void loadMathJax();
     this.registerView(VIEW_TYPE, (leaf) => new ChecklistView(leaf, this));
     this.addRibbonIcon("check-square", "Open Checklist", () => { void this.activateView(); });
     this.addCommand({ id: "open-checklist", name: "Open Checklist panel", callback: () => { void this.activateView(); } });
