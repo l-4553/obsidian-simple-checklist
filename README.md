@@ -16,6 +16,7 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 - **Fold notes and headings** — hover a note title or heading and click the arrow on its left to fold the todos below it; click again to unfold. Folds are remembered
 - **Inline rendering** — wiki links (`[[Note]]`), Markdown links, inline code (`` `code` ``), **bold** (`**text**`), *italic* (`*text*`), ~~strikethrough~~ (`~~text~~`), LaTeX math (`$x^2$`, `$$…$$`) and highlights (`==text==`) inside todo text are rendered inline, including Obsidian's highlight colors (`==🟢text==`)
 - **Delete from the panel** — remove a todo from the file entirely using the trash icon
+- **Undo** — press Cmd+Z (Ctrl+Z on Windows/Linux) while the panel is focused to undo the last check-off, delete or move made in the panel; press it repeatedly to step further back, also across notes
 - **Grouped by file** — todos are grouped under their source file; click a group title to open that note
 - **Grouped by heading** — optionally show each todo under the nearest heading above it in the note; click a heading to jump to it
 - **Nested indentation** — sub-todos are indented in the panel to mirror their nesting in the note

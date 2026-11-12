@@ -9,6 +9,7 @@ import {
   Plugin,
   PluginSettingTab,
   renderMath,
+  Scope,
   Setting,
   SettingControl,
   SettingDefinitionGroup,
@@ -29,6 +30,11 @@ const VIEW_TYPE = "checklist";
 // How long a checked-off todo stays in the panel, so it can be unchecked again.
 // Keep in sync with the checklist-done-fade animation in styles.css.
 const DONE_LINGER_MS = 5000;
+
+// Reverts one panel action; resolves false if there was nothing left to revert.
+type UndoFn = () => Promise<boolean>;
+// Panel actions Cmd/Ctrl+Z can step back through.
+const MAX_UNDO = 100;
 
 interface TodoHeading {
   text: string;
@@ -801,17 +807,12 @@ class ChecklistView extends ItemView {
       void this.plugin.setShowNoteTitles(!this.plugin.settings.showNoteTitles);
     });
     this.render();
-    // Forward Cmd/Ctrl+Z to the last-modified editor, or our own undo stack if file isn't open
-    this.containerEl.addEventListener("keydown", (e) => {
-      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.key !== "z") return;
-      const editor = this.plugin.getLastModifiedEditor();
-      if (editor) {
-        e.preventDefault();
-        editor.undo();
-      } else {
-        e.preventDefault();
-        void this.plugin.undoLastSidebarAction();
-      }
+    // Cmd+Z (Ctrl+Z on Windows/Linux) while the panel is active undoes the
+    // last panel action, also across notes.
+    this.scope = new Scope(this.app.scope);
+    this.scope.register(["Mod"], "z", () => {
+      void this.plugin.undoLastSidebarAction();
+      return false;
     });
     return Promise.resolve();
   }
@@ -1229,8 +1230,7 @@ export default class ChecklistPlugin extends Plugin {
   private writeQueue: Promise<void> = Promise.resolve();
   // Tracks the last content we processed per file so editor-change and vault-modify don't double-fire
   private lastProcessedContent = new Map<string, string>();
-  private lastModifiedFile: TFile | null = null;
-  private undoStack: Array<() => Promise<void>> = [];
+  private undoStack: UndoFn[] = [];
   private suppressRollOverOnCreate = false;
   // Note or folder the panel was last rendered for (see getScopeKey).
   private renderedScopeKey: string | null = null;
@@ -1622,13 +1622,50 @@ export default class ChecklistPlugin extends Plugin {
     return null;
   }
 
-  getLastModifiedEditor(): Editor | null {
-    return this.lastModifiedFile ? this.getEditorForFile(this.lastModifiedFile) : null;
+  private pushUndo(fn: UndoFn): void {
+    this.undoStack.push(fn);
+    if (this.undoStack.length > MAX_UNDO) this.undoStack.shift();
   }
 
+  // Reverts the most recent panel action (check off, delete, move), across
+  // notes. Entries that no longer apply (e.g. the todo was already unchecked
+  // by hand) are skipped, so each press undoes something.
   async undoLastSidebarAction(): Promise<void> {
-    const fn = this.undoStack.pop();
-    if (fn) await fn();
+    await this.enqueue(async () => {
+      let fn: UndoFn | undefined;
+      while ((fn = this.undoStack.pop())) {
+        if (await fn()) break;
+      }
+    });
+    this.refreshView();
+  }
+
+  // Edits a note's lines in place. `edit` mutates the array and returns
+  // whether it changed anything. In an open editor only the changed span is
+  // replaced, so the cursor and editor history stay intact.
+  private async editLines(file: TFile, edit: (lines: string[]) => boolean): Promise<boolean> {
+    const editor = this.getEditorForFile(file);
+    const before = editor ? editor.getValue() : await this.app.vault.read(file);
+    const lines = before.split("\n");
+    if (!edit(lines)) return false;
+    const after = lines.join("\n");
+    if (after === before) return false;
+    if (editor) {
+      let start = 0;
+      while (start < before.length && start < after.length && before[start] === after[start]) start++;
+      let end = 0;
+      while (end < before.length - start && end < after.length - start &&
+        before[before.length - 1 - end] === after[after.length - 1 - end]) end++;
+      editor.replaceRange(
+        after.slice(start, after.length - end),
+        editor.offsetToPos(start),
+        editor.offsetToPos(before.length - end),
+      );
+    } else {
+      await this.app.vault.modify(file, after);
+    }
+    this.syncContent(file, after);
+    return true;
   }
 
   private findTodoLine(lines: string[], todo: TodoItem): number {
@@ -1647,92 +1684,48 @@ export default class ChecklistPlugin extends Plugin {
 
   async deleteTodo(todo: TodoItem): Promise<void> {
     return this.enqueue(async () => {
-      const editor = this.getEditorForFile(todo.file);
-      if (editor) {
-        const lines = editor.getValue().split("\n");
-        const idx = this.findTodoLine(lines, todo);
-        if (idx >= 0 && lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) {
-          const from = { line: idx, ch: 0 };
-          // Delete the line including its newline; if it's the last line, delete the preceding newline
-          const isLast = idx === lines.length - 1;
-          const to = isLast
-            ? { line: idx - 1, ch: lines[idx - 1]?.length ?? 0 }
-            : { line: idx + 1, ch: 0 };
-          if (isLast && idx === 0) {
-            editor.replaceRange("", from, { line: idx, ch: lines[idx].length });
-          } else if (isLast) {
-            editor.replaceRange("", to, { line: idx, ch: lines[idx].length });
-          } else {
-            editor.replaceRange("", from, to);
-          }
-          this.lastModifiedFile = todo.file;
-        }
-      } else {
-        const content = await this.app.vault.read(todo.file);
-        const lines = content.split("\n");
-        const idx = this.findTodoLine(lines, todo);
-        if (idx >= 0 && lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) {
-          const deletedLine = lines[idx];
-          lines.splice(idx, 1);
-          await this.app.vault.modify(todo.file, lines.join("\n"));
-          this.lastModifiedFile = todo.file;
-          this.undoStack.push(async () => {
-            const current = await this.app.vault.read(todo.file);
-            const cur = current.split("\n");
-            cur.splice(idx, 0, deletedLine);
-            await this.app.vault.modify(todo.file, cur.join("\n"));
-          });
-        }
-      }
+      let idx = -1;
+      let deletedLine = "";
+      const deleted = await this.editLines(todo.file, (lines) => {
+        idx = this.findTodoLine(lines, todo);
+        if (idx < 0 || !TODO_OPEN_PREFIX.test(lines[idx])) return false;
+        [deletedLine] = lines.splice(idx, 1);
+        return true;
+      });
+      if (!deleted) return;
+      this.pushUndo(() => this.editLines(todo.file, (lines) => {
+        lines.splice(Math.min(idx, lines.length), 0, deletedLine);
+        return true;
+      }));
     });
   }
 
   async completeTodo(todo: TodoItem): Promise<void> {
     return this.enqueue(async () => {
-      const editor = this.getEditorForFile(todo.file);
-      if (editor) {
-        const lines = editor.getValue().split("\n");
+      let completed: Array<{ line: number; text: string }> = [];
+      const changed = await this.editLines(todo.file, (lines) => {
         const idx = this.findTodoLine(lines, todo);
-        if (idx >= 0 && lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) {
-          // One transaction, so a single undo restores the whole subtree.
-          const changes = this.linesToComplete(lines, idx).map((line) => {
-            const ch = lines[line].indexOf("- [ ]");
-            return { from: { line, ch }, to: { line, ch: ch + 5 }, text: "- [x]" };
-          });
-          editor.transaction({ changes });
-          this.lastModifiedFile = todo.file;
-          this.syncContent(todo.file, editor.getValue());
+        if (idx < 0 || !TODO_OPEN_PREFIX.test(lines[idx])) return false;
+        completed = this.linesToComplete(lines, idx).map((line) => {
+          const text = lines[line].match(TODO_OPEN_RE)?.[1] ?? todo.text;
+          lines[line] = lines[line].replace("- [ ]", "- [x]");
+          return { line, text };
+        });
+        return true;
+      });
+      if (!changed) return;
+      // Unchecks the todo and the nested todos checked off with it.
+      this.pushUndo(() => this.editLines(todo.file, (lines) => {
+        let reverted = false;
+        for (const { line, text } of completed) {
+          const i = this.findTodoLine(lines, { file: todo.file, text, lineIndex: line, done: true });
+          if (i >= 0) {
+            lines[i] = lines[i].replace("- [x]", "- [ ]");
+            reverted = true;
+          }
         }
-      } else {
-        const content = await this.app.vault.read(todo.file);
-        const lines = content.split("\n");
-        const idx = this.findTodoLine(lines, todo);
-        if (idx >= 0 && lines[idx] && TODO_OPEN_PREFIX.test(lines[idx])) {
-          const completed = this.linesToComplete(lines, idx).map((line) => {
-            const text = lines[line].match(TODO_OPEN_RE)?.[1] ?? todo.text;
-            lines[line] = lines[line].replace("- [ ]", "- [x]");
-            return { line, text };
-          });
-          await this.app.vault.modify(todo.file, lines.join("\n"));
-          this.lastModifiedFile = todo.file;
-          this.syncContent(todo.file, lines.join("\n"));
-          this.undoStack.push(async () => {
-            const current = await this.app.vault.read(todo.file);
-            const cur = current.split("\n");
-            let changed = false;
-            for (const { line, text } of completed) {
-              const i = cur.findIndex((l, li) =>
-                li >= line - 2 && li <= line + 2 && l.includes("- [x]") && l.includes(text)
-              );
-              if (i >= 0) {
-                cur[i] = cur[i].replace("- [x]", "- [ ]");
-                changed = true;
-              }
-            }
-            if (changed) await this.app.vault.modify(todo.file, cur.join("\n"));
-          });
-        }
-      }
+        return reverted;
+      }));
     });
   }
 
@@ -1757,7 +1750,6 @@ export default class ChecklistPlugin extends Plugin {
             return { from: { line, ch }, to: { line, ch: ch + 5 }, text: "- [ ]" };
           }),
         });
-        this.lastModifiedFile = todo.file;
         this.syncContent(todo.file, editor.getValue());
       } else {
         for (const line of toReopen) lines[line] = lines[line].replace("- [x]", "- [ ]");
@@ -1811,7 +1803,13 @@ export default class ChecklistPlugin extends Plugin {
         if (insertIdx === srcIdx && block.every((l, i) => l === original[i])) return;
         lines.splice(insertIdx, 0, ...block);
         await this.app.vault.modify(todo.file, lines.join("\n"));
-        this.lastModifiedFile = todo.file;
+        this.pushUndo(() => this.editLines(todo.file, (cur) => {
+          const at = this.findTodoLine(cur, { ...todo, lineIndex: insertIdx });
+          if (at < 0) return false;
+          cur.splice(at, blockLen);
+          cur.splice(Math.min(srcIdx, cur.length), 0, ...original);
+          return true;
+        }));
       } else {
         const srcContent = await this.app.vault.read(todo.file);
         const srcLines = srcContent.split("\n");
@@ -1830,16 +1828,19 @@ export default class ChecklistPlugin extends Plugin {
         const srcPath = todo.file.path;
         await this.app.vault.modify(todo.file, srcLines.join("\n"));
         await this.app.vault.modify(targetFile, tgtLines.join("\n"));
-        this.lastModifiedFile = targetFile;
-        this.undoStack.push(async () => {
-          const curTgt = (await this.app.vault.read(targetFile)).split("\n");
-          const tgtIdx = curTgt.findIndex((l) => TODO_OPEN_PREFIX.test(l) && l.includes(todo.text));
-          if (tgtIdx < 0) return;
-          curTgt.splice(tgtIdx, blockLen);
-          await this.app.vault.modify(targetFile, curTgt.join("\n"));
-          const curSrc = (await this.app.vault.read(todo.file)).split("\n");
-          curSrc.splice(srcIdx, 0, ...block);
-          await this.app.vault.modify(todo.file, curSrc.join("\n"));
+        this.pushUndo(async () => {
+          const removed = await this.editLines(targetFile, (cur) => {
+            const at = this.findTodoLine(cur, { ...todo, lineIndex: drop.line });
+            if (at < 0) return false;
+            cur.splice(at, blockLen);
+            return true;
+          });
+          if (!removed) return false;
+          await this.editLines(todo.file, (cur) => {
+            cur.splice(Math.min(srcIdx, cur.length), 0, ...block);
+            return true;
+          });
+          return true;
         });
         const srcFile = this.app.vault.getAbstractFileByPath(srcPath);
         if (srcFile instanceof TFile) await this.updateIndex(srcFile);
@@ -1915,7 +1916,6 @@ export default class ChecklistPlugin extends Plugin {
         todayLines.push(...linesToMove);
         await this.app.vault.modify(todayNote, todayLines.join("\n"));
         await this.updateIndex(todayNote);
-        this.lastModifiedFile = todayNote;
       } finally {
         this.suppressRefresh = false;
         this.refreshView();
