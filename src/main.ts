@@ -78,8 +78,8 @@ function compareNoteGroups(a: TFile, b: TFile, mode: SortMode): number {
 interface ChecklistSettings {
   todoScope: TodoScope;
   sortMode: SortMode;
-  // Show only the todos, without note titles and dividers ("bare" mode).
-  hideNoteTitles: boolean;
+  // Show note titles and dividers; off shows only the todos ("bare" mode).
+  showNoteTitles: boolean;
   // Group each note's todos under the nearest heading above them.
   showHeadings: boolean;
   dateNotesOnly: boolean;
@@ -104,7 +104,7 @@ type BooleanSettingKey = {
 const DEFAULT_SETTINGS: ChecklistSettings = {
   todoScope: "vault",
   sortMode: "recent",
-  hideNoteTitles: false,
+  showNoteTitles: true,
   showHeadings: false,
   dateNotesOnly: false,
   hideFutureDateNotes: false,
@@ -778,12 +778,12 @@ class ChecklistView extends ItemView {
   // Without note titles, todos can only be reordered within their own note:
   // dropping must never move a todo into a different note.
   private canDropInto(filePath: string): boolean {
-    return !this.plugin.settings.hideNoteTitles || this.dragSourcePath === filePath;
+    return this.plugin.settings.showNoteTitles || this.dragSourcePath === filePath;
   }
 
   private updateTitleToggle(): void {
     if (!this.titleToggleEl) return;
-    const hidden = this.plugin.settings.hideNoteTitles;
+    const hidden = !this.plugin.settings.showNoteTitles;
     setIcon(this.titleToggleEl, hidden ? "heading" : "list");
     this.titleToggleEl.setAttr("aria-label", hidden ? "Show note titles" : "Hide note titles");
   }
@@ -798,7 +798,7 @@ class ChecklistView extends ItemView {
   getIcon(): string { return "check-square"; }
   onOpen(): Promise<void> {
     this.titleToggleEl = this.addAction("list", "Hide note titles", () => {
-      void this.plugin.setHideNoteTitles(!this.plugin.settings.hideNoteTitles);
+      void this.plugin.setShowNoteTitles(!this.plugin.settings.showNoteTitles);
     });
     this.render();
     // Forward Cmd/Ctrl+Z to the last-modified editor, or our own undo stack if file isn't open
@@ -855,7 +855,7 @@ class ChecklistView extends ItemView {
     if (!this.wrapper) {
       this.wrapper = container.createDiv({ cls: "checklist-container" });
     }
-    this.wrapper.classList.toggle("is-bare", this.plugin.settings.hideNoteTitles);
+    this.wrapper.classList.toggle("is-bare", !this.plugin.settings.showNoteTitles);
     this.wrapper.classList.toggle("has-headings", this.plugin.settings.showHeadings);
     this.updateTitleToggle();
 
@@ -1089,7 +1089,7 @@ class ChecklistView extends ItemView {
       const payload = this.parseDragPayload(e);
       if (!payload) return;
       // Without note titles, a todo may only be reordered within its own note.
-      if (this.plugin.settings.hideNoteTitles && payload.sourcePath !== targetFile.path) return;
+      if (!this.plugin.settings.showNoteTitles && payload.sourcePath !== targetFile.path) return;
       e.preventDefault();
       e.stopPropagation();
       const todo = this.payloadToTodo(payload);
@@ -1244,9 +1244,14 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   async loadSettings(): Promise<void> {
-    const stored = (await this.loadData()) as (Partial<ChecklistSettings> & { excludeKeywords?: string }) | null;
-    const { excludeKeywords, ...rest } = stored ?? {};
+    const stored = (await this.loadData()) as
+      (Partial<ChecklistSettings> & { excludeKeywords?: string; hideNoteTitles?: boolean }) | null;
+    const { excludeKeywords, hideNoteTitles, ...rest } = stored ?? {};
     this.settings = { ...DEFAULT_SETTINGS, ...rest };
+    // Up to 1.10.x, the setting was inverted as "Hide note titles".
+    if (rest.showNoteTitles === undefined && hideNoteTitles !== undefined) {
+      this.settings.showNoteTitles = !hideNoteTitles;
+    }
     if (!isTodoScope(this.settings.todoScope)) this.settings.todoScope = "vault";
     // Up to 1.10.x, exclusions were a comma-separated keyword list. Carry them
     // over as one keyword per line.
@@ -1272,7 +1277,7 @@ export default class ChecklistPlugin extends Plugin {
     this.addCommand({
       id: "toggle-note-titles",
       name: "Toggle note titles in Checklist panel",
-      callback: () => { void this.setHideNoteTitles(!this.settings.hideNoteTitles); },
+      callback: () => { void this.setShowNoteTitles(!this.settings.showNoteTitles); },
     });
     this.addSettingTab(new ChecklistSettingTab(this.app, this));
     this.register(() => {
@@ -1979,8 +1984,8 @@ export default class ChecklistPlugin extends Plugin {
   }
 
   // Display-only change: re-render without resetting the note order.
-  async setHideNoteTitles(value: boolean): Promise<void> {
-    await this.updateSetting("hideNoteTitles", value);
+  async setShowNoteTitles(value: boolean): Promise<void> {
+    await this.updateSetting("showNoteTitles", value);
   }
 
   // Saves one setting changed in the settings tab (or the panel header) and
@@ -1989,7 +1994,7 @@ export default class ChecklistPlugin extends Plugin {
   async updateSetting<K extends EditableSettingKey>(key: K, value: ChecklistSettings[K]): Promise<void> {
     this.settings[key] = value;
     await this.saveSettings();
-    if (key === "hideNoteTitles" || key === "showHeadings") this.refreshView();
+    if (key === "showNoteTitles" || key === "showHeadings") this.refreshView();
     else if (key === "movePastTodosToToday") {
       if (value) await this.runRollOverToToday();
     } else this.applySettingsToViews();
@@ -2057,17 +2062,13 @@ class ChecklistSettingTab extends PluginSettingTab {
             },
           },
           {
-            name: "Hide note titles",
-            desc:
-              "Show only the todos, without note titles. Dragging then only reorders todos within their own note. " +
-              "Also available as a button in the panel header.",
-            control: { type: "toggle", key: "hideNoteTitles" },
+            name: "Show note titles",
+            desc: "Group todos under their note's title. Also toggled from the panel header.",
+            control: { type: "toggle", key: "showNoteTitles" },
           },
           {
             name: "Show headings",
-            desc:
-              "Group each note's todos under the nearest heading above them. " +
-              "Priority sorting then applies within each heading instead of the whole note.",
+            desc: "Group todos under the nearest heading above them.",
             control: { type: "toggle", key: "showHeadings" },
           },
         ],
