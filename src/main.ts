@@ -1,5 +1,6 @@
 import {
   App,
+  debounce,
   Editor,
   finishRenderMath,
   ItemView,
@@ -52,6 +53,9 @@ interface TodoItem {
   heading?: TodoHeading;
   // Just checked off: shown greyed out until it fades from the panel (see DONE_LINGER_MS).
   done?: boolean;
+  // Checked off earlier and shown below the note's open todos (see the
+  // "Show completed todos" setting), greyed out but without fading.
+  completed?: boolean;
 }
 
 type SortMode = "recent" | "oldest" | "alpha" | "alpha-desc";
@@ -65,6 +69,64 @@ const SCOPE_OPTIONS: Record<TodoScope, string> = {
 
 function isTodoScope(value: unknown): value is TodoScope {
   return typeof value === "string" && Object.prototype.hasOwnProperty.call(SCOPE_OPTIONS, value);
+}
+
+type CompletedRange = "none" | "today" | "3days" | "week" | "7days" | "month" | "30days" | "all";
+
+const COMPLETED_OPTIONS: Record<CompletedRange, string> = {
+  none: "None",
+  today: "Today",
+  "3days": "Last 3 days",
+  week: "This week",
+  "7days": "Last 7 days",
+  month: "This month",
+  "30days": "Last 30 days",
+  all: "All",
+};
+
+function isCompletedRange(value: unknown): value is CompletedRange {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(COMPLETED_OPTIONS, value);
+}
+
+// Start (ms) of the time span a range covers; null for "all", which isn't limited.
+function completedSince(range: Exclude<CompletedRange, "none">): number | null {
+  switch (range) {
+    case "today": return typedMoment().startOf("day").valueOf();
+    case "3days": return typedMoment().subtract(3, "days").valueOf();
+    case "week": return typedMoment().startOf("week").valueOf();
+    case "7days": return typedMoment().subtract(7, "days").valueOf();
+    case "month": return typedMoment().startOf("month").valueOf();
+    case "30days": return typedMoment().subtract(30, "days").valueOf();
+    case "all": return null;
+  }
+}
+
+// When a todo was checked off. Recorded for every todo checked off (in the
+// panel or the note), whatever "Show completed todos" is set to, so switching
+// the setting shows past completions right away. The record points at its
+// "- [x]" line by note path and text, like the panel's rows, so it survives
+// line shifts; renames, edits, unchecking and moves update it (see
+// updateCompletions and resolveCompletedTodos).
+interface CompletionRecord {
+  path: string;
+  text: string;
+  at: number;
+}
+
+function isCompletionRecord(value: unknown): value is CompletionRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return typeof record.path === "string" && typeof record.text === "string" && typeof record.at === "number";
+}
+
+// How long completion records are kept: long enough for "Last 30 days" and
+// "This month" (up to 31 days back).
+const COMPLETION_RETENTION_MS = 32 * 24 * 60 * 60 * 1000;
+
+function countTexts(items: Iterable<{ text: string }> | undefined): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const { text } of items ?? []) counts.set(text, (counts.get(text) ?? 0) + 1);
+  return counts;
 }
 
 function compareNoteGroups(a: TFile, b: TFile, mode: SortMode): number {
@@ -99,10 +161,15 @@ interface ChecklistSettings {
   pinnedPaths: string[];
   // Folded note titles and headings in the panel (see foldKey).
   foldedKeys: string[];
+  // Checked-off todos shown below each note's open todos, by when they were checked off.
+  showCompleted: CompletedRange;
+  // When todos were checked off, for the last COMPLETION_RETENTION_MS.
+  completions: CompletionRecord[];
 }
 
-// Settings edited through the settings tab (pinnedPaths and foldedKeys are managed by the panel).
-type EditableSettingKey = Exclude<keyof ChecklistSettings, "pinnedPaths" | "foldedKeys">;
+// Settings edited through the settings tab (pinnedPaths, foldedKeys and
+// completions are managed by the plugin).
+type EditableSettingKey = Exclude<keyof ChecklistSettings, "pinnedPaths" | "foldedKeys" | "completions">;
 type BooleanSettingKey = {
   [K in EditableSettingKey]: ChecklistSettings[K] extends boolean ? K : never;
 }[EditableSettingKey];
@@ -119,6 +186,8 @@ const DEFAULT_SETTINGS: ChecklistSettings = {
   excludeRules: "",
   pinnedPaths: [],
   foldedKeys: [],
+  showCompleted: "none",
+  completions: [],
 };
 
 interface DragTodoPayload {
@@ -252,6 +321,21 @@ function sortTodosWithinHeadings(items: TodoItem[]): TodoItem[] {
     }
   }
   return out;
+}
+
+// Puts each completed todo after the open todos of its heading (todos are
+// grouped by heading in note order, see sortTodosWithinHeadings). A heading
+// with only completed todos gets its own section, in note order.
+function mergeUnderHeadings(open: TodoItem[], done: TodoItem[]): TodoItem[] {
+  const sections = new Map<number, TodoItem[]>();
+  const add = (todo: TodoItem) => {
+    const line = todo.heading?.line ?? -1;
+    if (!sections.has(line)) sections.set(line, []);
+    sections.get(line)!.push(todo);
+  };
+  open.forEach(add);
+  done.forEach(add);
+  return [...sections.entries()].sort((a, b) => a[0] - b[0]).flatMap(([, todos]) => todos);
 }
 
 // Todo lines, with optional callout prefix(es): "  > > - [ ] text" matches.
@@ -760,6 +844,18 @@ function itemKey(filePath: string, text: string, occurrence: number): string {
   return occurrence === 0 ? `${filePath}\0${text}` : `${filePath}\0${text}\0${occurrence}`;
 }
 
+// Key of a todo row: completed todos (see TodoItem.completed) get their own
+// rows, apart from open or just checked-off todos with the same text.
+function todoRowKey(todo: TodoItem, occurrence: number): string {
+  const key = itemKey(todo.file.path, todo.text, occurrence);
+  return todo.completed ? `${key}\0completed` : key;
+}
+
+// Occurrence counter base for todoRowKey.
+function todoRowBase(todo: TodoItem): string {
+  return `${todo.file.path}\0${todo.text}${todo.completed ? "\0completed" : ""}`;
+}
+
 class ChecklistView extends ItemView {
   plugin: ChecklistPlugin;
 
@@ -920,10 +1016,10 @@ class ChecklistView extends ItemView {
     // Track occurrence count per (file, text) pair to handle duplicates.
     const occurrences = new Map<string, number>();
     const todoKeys = todos.map(t => {
-      const base = `${t.file.path}\0${t.text}`;
+      const base = todoRowBase(t);
       const occ = occurrences.get(base) ?? 0;
       occurrences.set(base, occ + 1);
-      return itemKey(t.file.path, t.text, occ);
+      return todoRowKey(t, occ);
     });
     const liveKeys = new Set(todoKeys);
 
@@ -984,10 +1080,10 @@ class ChecklistView extends ItemView {
           headingFolded = currentHeading !== undefined && folded.has(foldKey(filePath, currentHeading));
           if (todo.heading) this.buildHeading(groupData.group, todo.file, todo.heading, headingFolded);
         }
-        const base = `${filePath}\0${todo.text}`;
+        const base = todoRowBase(todo);
         const occ = fileOccurrences.get(base) ?? 0;
         fileOccurrences.set(base, occ + 1);
-        const key = itemKey(filePath, todo.text, occ);
+        const key = todoRowKey(todo, occ);
 
         let row = this.rowEls.get(key);
         if (!row) {
@@ -997,6 +1093,7 @@ class ChecklistView extends ItemView {
         // Set on every reconcile so re-indenting a todo in the note updates the row.
         row.style.setProperty("--checklist-depth", String(todo.depth ?? 0));
         row.classList.toggle("is-done", !!todo.done);
+        row.classList.toggle("is-completed", !!todo.completed);
         row.draggable = !todo.done;
         row.classList.toggle("is-folded", headingFolded);
         this.rowTodos.set(row, todo);
@@ -1029,7 +1126,8 @@ class ChecklistView extends ItemView {
   // even when the next row is a nested child. Returns null when the drop would
   // leave the dragged todo where it is.
   private getDropTarget(groupEl: HTMLElement, e: DragEvent): { row: HTMLElement; after: boolean } | null {
-    const rows = Array.from(groupEl.querySelectorAll<HTMLElement>(":scope > .checklist-item"));
+    // Completed todos at the bottom of the note aren't drop targets.
+    const rows = Array.from(groupEl.querySelectorAll<HTMLElement>(":scope > .checklist-item:not(.is-completed)"));
     if (rows.length === 0) return null;
     const node = e.targetNode;
     const el = node?.instanceOf(HTMLElement) ? node : null;
@@ -1222,8 +1320,21 @@ interface DoneTimer {
   timer: number | null;
 }
 
+// A checked-off todo shown by "Show completed todos": its "- [x]" line, and
+// when it was checked off (unknown for older ones, shown only with "All").
+interface CompletedTodo {
+  lineIndex: number;
+  text: string;
+  at?: number;
+}
+
 export default class ChecklistPlugin extends Plugin {
   private index: Map<string, Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading; done?: boolean }>> = new Map();
+  // Every "- [x]" line per note, and the notes containing each done text.
+  private doneIndex = new Map<string, Array<{ lineIndex: number; text: string; heading?: TodoHeading }>>();
+  private doneTextPaths = new Map<string, Set<string>>();
+  // Saves completion records relinked while rendering (see resolveCompletedTodos).
+  private requestSaveCompletions = debounce(() => { void this.saveSettings(); }, 1000, true);
   // Recently checked-off todo texts per note, with the timer that drops them
   // from the panel. Their "- [x]" lines are indexed as done until then.
   private recentlyDone = new Map<string, Map<string, DoneTimer>>();
@@ -1257,6 +1368,9 @@ export default class ChecklistPlugin extends Plugin {
       this.settings.showNoteTitles = !hideNoteTitles;
     }
     if (!isTodoScope(this.settings.todoScope)) this.settings.todoScope = "vault";
+    if (!isCompletedRange(this.settings.showCompleted)) this.settings.showCompleted = "none";
+    this.settings.completions = Array.isArray(rest.completions) ? rest.completions.filter(isCompletionRecord) : [];
+    this.pruneCompletions();
     // Up to 1.10.x, exclusions were a comma-separated keyword list. Carry them
     // over as one keyword per line.
     if (rest.excludeRules === undefined && excludeKeywords) {
@@ -1287,6 +1401,11 @@ export default class ChecklistPlugin extends Plugin {
     this.register(() => {
       for (const path of [...this.recentlyDone.keys()]) this.forgetDone(path);
     });
+    // Completed todos shown for "Today", "This week", … drop out as time passes.
+    this.registerInterval(window.setInterval(() => {
+      const range = this.settings.showCompleted;
+      if (range !== "none" && range !== "all") this.refreshView();
+    }, 60 * 1000));
 
     this.app.workspace.onLayoutReady(async () => {
       await this.buildIndex();
@@ -1337,6 +1456,7 @@ export default class ChecklistPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("delete", (file) => {
       if (file instanceof TFile) {
         this.index.delete(file.path);
+        this.setDoneLines(file.path, []);
         this.forgetDone(file.path);
         this.lastProcessedContent.delete(file.path);
         this.refreshView();
@@ -1346,7 +1466,17 @@ export default class ChecklistPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("rename", async (file, oldPath) => {
       if (file instanceof TFile && file.extension === "md") {
         this.index.delete(oldPath);
+        this.setDoneLines(oldPath, []);
         this.forgetDone(oldPath);
+        // Completed todos move along with their note.
+        let moved = false;
+        for (const record of this.settings.completions) {
+          if (record.path === oldPath) {
+            record.path = file.path;
+            moved = true;
+          }
+        }
+        if (moved) void this.saveSettings();
         await this.updateIndex(file);
         this.refreshView();
       }
@@ -1365,6 +1495,7 @@ export default class ChecklistPlugin extends Plugin {
 
   private indexContent(filePath: string, content: string): void {
     const todos: Array<{ lineIndex: number; text: string; indent: number; heading?: TodoHeading; done?: boolean }> = [];
+    const doneLines: Array<{ lineIndex: number; text: string; heading?: TodoHeading }> = [];
     const recentlyDone = this.recentlyDone.get(filePath);
     let heading: TodoHeading | undefined;
     content.split("\n").forEach((line, i) => {
@@ -1372,13 +1503,163 @@ export default class ChecklistPlugin extends Plugin {
       if (headingMatch) heading = { text: headingMatch[1].trimEnd(), line: i };
       const m = line.match(TODO_OPEN_RE);
       if (m) todos.push({ lineIndex: i, text: m[1], indent: listIndentWidth(line), heading });
-      const d = recentlyDone && line.match(TODO_DONE_RE);
-      if (d && recentlyDone.has(d[1])) {
+      const d = line.match(TODO_DONE_RE);
+      if (!d) return;
+      doneLines.push({ lineIndex: i, text: d[1], heading });
+      if (recentlyDone?.has(d[1])) {
         todos.push({ lineIndex: i, text: d[1], indent: listIndentWidth(line), heading, done: true });
       }
     });
     if (todos.length > 0) this.index.set(filePath, todos);
     else this.index.delete(filePath);
+    this.setDoneLines(filePath, doneLines);
+  }
+
+  private setDoneLines(filePath: string, lines: Array<{ lineIndex: number; text: string; heading?: TodoHeading }>): void {
+    for (const { text } of this.doneIndex.get(filePath) ?? []) {
+      const paths = this.doneTextPaths.get(text);
+      paths?.delete(filePath);
+      if (paths?.size === 0) this.doneTextPaths.delete(text);
+    }
+    if (lines.length === 0) {
+      this.doneIndex.delete(filePath);
+      return;
+    }
+    this.doneIndex.set(filePath, lines);
+    for (const { text } of lines) {
+      let paths = this.doneTextPaths.get(text);
+      if (!paths) this.doneTextPaths.set(text, (paths = new Set()));
+      paths.add(filePath);
+    }
+  }
+
+  private pruneCompletions(): void {
+    const cutoff = Date.now() - COMPLETION_RETENTION_MS;
+    this.settings.completions = this.settings.completions.filter((r) => r.at >= cutoff);
+  }
+
+  // Keeps the completion records of a note in step with an edit of it, given
+  // the open and done todo texts (with counts) before and after. A note can
+  // only hold as many records for a text as it has "- [x]" lines with it; the
+  // newest records beyond that are dropped if the todo was unchecked, follow
+  // the text if a done todo was edited, and otherwise (deleted or moved to
+  // another note) are left to resolveCompletedTodos, which relinks them to
+  // the note the line turns up in. `completed` are the todos just checked off.
+  private updateCompletions(
+    filePath: string,
+    oldOpen: Map<string, number>,
+    newOpen: Map<string, number>,
+    oldDone: Map<string, number>,
+    newDone: Map<string, number>,
+    completed: Set<string>,
+  ): void {
+    // Records of `text` in this note beyond its done lines, newest first.
+    const excess = (text: string) => {
+      const own = this.settings.completions.filter((r) => r.path === filePath && r.text === text).sort((a, b) => b.at - a.at);
+      return own.slice(0, Math.max(0, own.length - (newDone.get(text) ?? 0)));
+    };
+    let changed = false;
+    const lost: string[] = [];
+    for (const [text, count] of oldDone) {
+      if ((newDone.get(text) ?? 0) >= count) continue;
+      if ((newOpen.get(text) ?? 0) > (oldOpen.get(text) ?? 0)) {
+        const drop = new Set(excess(text));
+        if (drop.size > 0) {
+          this.settings.completions = this.settings.completions.filter((r) => !drop.has(r));
+          changed = true;
+        }
+      } else {
+        lost.push(text);
+      }
+    }
+    const gained = [...newDone].filter(([text, count]) => count > (oldDone.get(text) ?? 0) && !completed.has(text));
+    // One done todo's text changed: its record follows the new text.
+    if (lost.length === 1 && gained.length === 1) {
+      for (const record of excess(lost[0])) {
+        record.text = gained[0][0];
+        changed = true;
+      }
+    }
+    if (completed.size > 0) {
+      const now = Date.now();
+      for (const text of completed) {
+        // The note's other "- [x]" lines with this text keep at most one record each.
+        const own = this.settings.completions
+          .filter((r) => r.path === filePath && r.text === text)
+          .sort((a, b) => b.at - a.at);
+        const stale = new Set(own.slice(Math.max(0, (newDone.get(text) ?? 1) - 1)));
+        this.settings.completions = this.settings.completions.filter((r) => !stale.has(r));
+        this.settings.completions.push({ path: filePath, text, at: now });
+      }
+      this.pruneCompletions();
+      changed = true;
+    }
+    if (changed) void this.saveSettings();
+  }
+
+  // Matches the completion records to the "- [x]" lines they belong to and
+  // returns, per note, the checked-off todos "Show completed todos" shows,
+  // most recently checked off first. A record whose note no longer has its
+  // line (the todo was moved, or its note renamed outside Obsidian) is
+  // relinked to another note with an unmatched done line of the same text that
+  // was modified since (so a deleted todo doesn't take over an older one).
+  private resolveCompletedTodos(): Map<string, CompletedTodo[]> {
+    const shown = new Map<string, CompletedTodo[]>();
+    const range = this.settings.showCompleted;
+    if (range === "none") return shown;
+    const since = completedSince(range);
+    // Unmatched done lines per note and text, in line order.
+    const free = new Map<string, Map<string, number[]>>();
+    const freeLines = (path: string, text: string): number[] => {
+      let byText = free.get(path);
+      if (!byText) {
+        free.set(path, (byText = new Map<string, number[]>()));
+        for (const { lineIndex, text: t } of this.doneIndex.get(path) ?? []) {
+          if (!byText.has(t)) byText.set(t, []);
+          byText.get(t)!.push(lineIndex);
+        }
+      }
+      return byText.get(text) ?? [];
+    };
+    const show = (path: string, item: CompletedTodo) => {
+      if (!shown.has(path)) shown.set(path, []);
+      shown.get(path)!.push(item);
+    };
+    const claim = (record: CompletionRecord, lines: number[]) => {
+      const lineIndex = lines.shift()!;
+      if (since === null || record.at >= since) show(record.path, { lineIndex, text: record.text, at: record.at });
+    };
+
+    const records = [...this.settings.completions].sort((a, b) => b.at - a.at);
+    const orphans: CompletionRecord[] = [];
+    for (const record of records) {
+      const lines = freeLines(record.path, record.text);
+      if (lines.length > 0) claim(record, lines);
+      else orphans.push(record);
+    }
+    let relinked = false;
+    for (const record of orphans) {
+      for (const path of this.doneTextPaths.get(record.text) ?? []) {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        if (!(file instanceof TFile) || file.stat.mtime < record.at) continue;
+        const lines = freeLines(path, record.text);
+        if (lines.length === 0) continue;
+        record.path = path;
+        relinked = true;
+        claim(record, lines);
+        break;
+      }
+    }
+    if (relinked) this.requestSaveCompletions();
+
+    // "All" also shows todos checked off before they were recorded.
+    if (since === null) {
+      for (const [path, lines] of this.doneIndex) {
+        const unrecorded = lines.filter(({ lineIndex, text }) => freeLines(path, text).includes(lineIndex));
+        for (const { lineIndex, text } of unrecorded) show(path, { lineIndex, text });
+      }
+    }
+    return shown;
   }
 
   // Keeps just checked-off todos in the panel for DONE_LINGER_MS (restarting
@@ -1444,9 +1725,11 @@ export default class ChecklistPlugin extends Plugin {
 
   private handleContentChange(file: TFile, content: string): void {
     const oldTodos = (this.index.get(file.path) ?? []).filter(t => !t.done);
+    const oldDone = countTexts(this.doneIndex.get(file.path));
     this.lastProcessedContent.set(file.path, content);
     this.indexContent(file.path, content);
-    const newTexts = new Set((this.index.get(file.path) ?? []).filter(t => !t.done).map(t => t.text));
+    const newOpen = (this.index.get(file.path) ?? []).filter(t => !t.done);
+    const newTexts = new Set(newOpen.map(t => t.text));
     // Todos unchecked again no longer linger as done.
     const reopened = [...(this.recentlyDone.get(file.path)?.keys() ?? [])].filter(t => newTexts.has(t));
     if (reopened.length > 0) {
@@ -1455,6 +1738,9 @@ export default class ChecklistPlugin extends Plugin {
     }
 
     const completedTexts = new Set<string>();
+    // Text of the "- [x]" lines of those todos, which other plugins may have
+    // extended (e.g. a completion date).
+    const completedLines = new Set<string>();
     if (oldTodos.length > 0) {
       const lines = content.split("\n");
       for (const old of oldTodos) {
@@ -1464,6 +1750,7 @@ export default class ChecklistPlugin extends Plugin {
           for (let i = lo; i <= hi; i++) {
             if (TODO_DONE_PREFIX.test(lines[i]) && lines[i].includes(old.text)) {
               completedTexts.add(old.text);
+              completedLines.add(lines[i].match(TODO_DONE_RE)?.[1] ?? old.text);
               break;
             }
           }
@@ -1471,9 +1758,15 @@ export default class ChecklistPlugin extends Plugin {
       }
     }
 
+    this.updateCompletions(file.path, countTexts(oldTodos), countTexts(newOpen), oldDone, countTexts(this.doneIndex.get(file.path)), completedLines);
+
     if (completedTexts.size > 0) {
-      this.markDone(file.path, completedTexts);
-      this.indexContent(file.path, content);
+      // Shown below the note's todos right away when completed todos are
+      // shown; otherwise they linger in place and fade.
+      if (this.settings.showCompleted === "none") {
+        this.markDone(file.path, completedTexts);
+        this.indexContent(file.path, content);
+      }
       this.app.workspace.getLeavesOfType(VIEW_TYPE).forEach((leaf) => {
         if (leaf.view instanceof ChecklistView) leaf.view.triggerExternalCompletion(file.path, completedTexts);
       });
@@ -1493,7 +1786,9 @@ export default class ChecklistPlugin extends Plugin {
     const needsFormat = this.settings.dateNotesOnly || this.settings.hideFutureDateNotes;
     const format = needsFormat ? this.getDateNotesFormat() : null;
     const exclude = parseExcludeRules(this.settings.excludeRules);
-    for (const [path, items] of this.index) {
+    const completed = this.resolveCompletedTodos();
+    for (const path of new Set([...this.index.keys(), ...completed.keys()])) {
+      const items = this.index.get(path) ?? [];
       if (scope === "note" && path !== activeNote?.path) continue;
       if (scope === "folder" && !path.startsWith(folder)) continue;
       if (isNoteExcluded(path, exclude)) continue;
@@ -1518,7 +1813,15 @@ export default class ChecklistPlugin extends Plugin {
       // item's nested children with it. The view groups by note path and
       // orders the note groups itself, so todos only need to be contiguous and
       // correctly ordered within their own note here.
-      todos.push(...(this.settings.showHeadings ? sortTodosWithinHeadings(noteTodos) : sortTodosByPriority(noteTodos)));
+      const open = this.settings.showHeadings ? sortTodosWithinHeadings(noteTodos) : sortTodosByPriority(noteTodos);
+      // Checked-off todos follow the open ones (of their heading, if headings
+      // are shown), most recently checked off first.
+      const headings = new Map((this.doneIndex.get(path) ?? []).map((l) => [l.lineIndex, l.heading]));
+      const done: TodoItem[] = (completed.get(path) ?? [])
+        .filter((c) => !isTodoExcluded(c.text, exclude))
+        .sort((a, b) => (b.at ?? -Infinity) - (a.at ?? -Infinity) || a.lineIndex - b.lineIndex)
+        .map((c) => ({ file, lineIndex: c.lineIndex, text: c.text, heading: headings.get(c.lineIndex), done: true, completed: true }));
+      todos.push(...(this.settings.showHeadings ? mergeUnderHeadings(open, done) : [...open, ...done]));
     }
     return todos;
   }
@@ -1998,7 +2301,7 @@ export default class ChecklistPlugin extends Plugin {
   async updateSetting<K extends EditableSettingKey>(key: K, value: ChecklistSettings[K]): Promise<void> {
     this.settings[key] = value;
     await this.saveSettings();
-    if (key === "showNoteTitles" || key === "showHeadings") this.refreshView();
+    if (key === "showNoteTitles" || key === "showHeadings" || key === "showCompleted") this.refreshView();
     else if (key === "movePastTodosToToday") {
       if (value) await this.runRollOverToToday();
     } else this.applySettingsToViews();
@@ -2074,6 +2377,15 @@ class ChecklistSettingTab extends PluginSettingTab {
             name: "Show headings",
             desc: "Group todos under the nearest heading above them.",
             control: { type: "toggle", key: "showHeadings" },
+          },
+          {
+            name: "Show completed todos",
+            desc:
+              "Keep todos checked off in this time span in the panel, greyed out below the open todos of their note or heading. " +
+              "Completion times are recorded for the last 30 days, whatever this is set to. All also shows " +
+              "todos checked off before that.",
+            aliases: ["done", "checked", "history"],
+            control: { type: "dropdown", key: "showCompleted", options: COMPLETED_OPTIONS },
           },
         ],
       },
@@ -2173,12 +2485,12 @@ class ChecklistSettingTab extends PluginSettingTab {
       }
       case "dropdown": {
         const { options } = control;
-        const key = control.key as "sortMode" | "todoScope";
+        const key = control.key as "sortMode" | "todoScope" | "showCompleted";
         setting.addDropdown((dropdown) =>
           dropdown
             .addOptions(options)
             .setValue(settings[key])
-            .onChange((value) => this.plugin.updateSetting(key, value as SortMode | TodoScope))
+            .onChange((value) => this.plugin.updateSetting(key, value as SortMode & TodoScope & CompletedRange))
         );
         break;
       }
