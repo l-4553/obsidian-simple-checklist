@@ -251,6 +251,12 @@
   opacity: 0.6;
 }
 
+/* Completed todos shown below a note's open todos stay greyed out instead of fading. */
+.checklist-item.is-done.is-completed {
+  animation: none;
+  opacity: 0.6;
+}
+
 @keyframes checklist-done-fade {
   0%, 70% { opacity: 0.6; }
   100%    { opacity: 0; }

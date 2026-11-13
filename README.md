@@ -7,6 +7,7 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 
 - **Every open todo in one panel** — scans every Markdown file and surfaces unchecked `- [ ]` items in one place, or only those from the current note or folder
 - **Check off without leaving your note** — tick a todo in the panel and it's marked `- [x]` in the file, with a small confetti burst. Checked-off todos stay in the panel, greyed out, for 5 seconds before they fade away; click the checkbox again in that time to uncheck them
+- **Completed todos** — optionally keep todos checked off today, in the last 3, 7 or 30 days, this week, this month or ever in the panel, greyed out below their note's or heading's open todos; they stay linked to their line when it shifts, is edited or moved to another note
 - **Priority by `!`** — todos ending in `!` float to the top of their note, with `!!` above `!` above none; todos containing a `==highlight==` come next, above plain todos
 - **Drag and drop** — reorder todos or move them into another note by dragging; an accent-colored line shows exactly where the todo will land (above or below a todo), and its nested sub-todos are carried along
 - **Daily note rollover** — optionally move open todos from past daily notes into today's note, when it's created or as soon as you turn the setting on
@@ -29,6 +30,7 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 - **Note sort order** — order groups by most/least recently modified, or note name (A–Z / Z–A)
 - **Show note titles** (on by default) — group todos under their note's title. When off, only the todos are shown and dragging only reorders within a note. Also toggled from the panel header button or the **Toggle note titles in Checklist panel** command
 - **Show headings** (off by default) — group todos under the nearest heading above them; click a heading to jump to it. Priority sorting then applies per heading
+- **Show completed todos** — **None** (default), **Today**, **Last 3 days**, **This week**, **Last 7 days**, **This month**, **Last 30 days** or **All**. Todos checked off in that time span stay in the panel, greyed out below the open todos of their note (or of their heading, with **Show headings** on), most recently checked off first; click the checkbox to uncheck one. The time a todo is checked off (in the panel or the note) is always recorded for the last 30 days, so switching the setting shows past completions right away. **All** also shows every other checked-off todo in your notes. A completed todo stays linked to its line when lines shift, the note is renamed, the todo is edited or moved to another note
 
 ### Filters
 
