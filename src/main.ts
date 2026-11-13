@@ -699,8 +699,12 @@ function renderTodoText(
         break;
       case "math": {
         const math = target.createSpan({ cls: "checklist-inline-math" });
+        math.toggleClass("is-display", token.display);
         try {
-          math.appendChild(renderMath(token.source, token.display));
+          const rendered = math.appendChild(renderMath(token.source, token.display));
+          // Classes for styles.css, which can't select MathJax's custom elements by tag.
+          rendered.addClass("checklist-math-container");
+          rendered.querySelector("mjx-math")?.addClass("checklist-math-body");
           hasMath = true;
         } catch {
           // MathJax not available (yet): show the source instead.
