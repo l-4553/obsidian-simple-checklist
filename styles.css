@@ -149,11 +149,16 @@
 
 .checklist-item {
   display: flex;
-  align-items: flex-start;
+  /* Baseline: the checkbox sits on the first line of the text, whatever the font. */
+  align-items: baseline;
   gap: 8px;
   /* Nested todos mirror the note's structure: 2ch (~2 spaces) of extra indent per level. */
   padding: 4px 12px;
-  padding-left: calc(12px + var(--checklist-depth, 0) * 2ch);
+  /* Whole pixels everywhere (indent, line height), so the checkboxes land on the
+     pixel grid and render identically square in every row. */
+  --checklist-indent: round(calc(12px + var(--checklist-depth, 0) * 2ch), 1px);
+  --checklist-line-height: round(calc(var(--font-ui-small) * 1.5), 1px);
+  padding-left: var(--checklist-indent);
   border-radius: 4px;
   cursor: default;
   position: relative;
@@ -173,7 +178,7 @@
 .checklist-drop-after::after {
   content: "";
   position: absolute;
-  left: calc(12px + var(--checklist-depth, 0) * 2ch);
+  left: var(--checklist-indent);
   right: 12px;
   height: 2px;
   border-radius: 1px;
@@ -193,8 +198,13 @@
   flex-shrink: 0;
   width: 15px;
   height: 15px;
-  margin-top: 3px;
-  border: 1.5px solid var(--checkbox-border-color, var(--text-faint));
+  /* Its bottom edge rests on the first line's baseline; shift it down so it is
+     centered on the capitals instead. The font matches .checklist-text, so the cap
+     unit is the text's cap height for any font and size. */
+  font-family: var(--font-text);
+  font-size: var(--font-ui-small);
+  top: calc(7.5px - 0.5cap);
+  border: 1px solid var(--checkbox-border-color, var(--text-faint));
   border-radius: var(--checkbox-radius, 3px);
   cursor: pointer;
   position: relative;
@@ -257,7 +267,7 @@
   font-size: var(--font-ui-small);
   color: var(--text-normal);
   cursor: pointer;
-  line-height: 1.5;
+  line-height: var(--checklist-line-height, 1.5);
   word-break: break-word;
 }
 
@@ -321,7 +331,7 @@
   background-color: var(--highlight-background-purple, rgba(var(--color-purple-rgb, 120, 82, 238), 0.3));
 }
 
-.checklist-inline-math mjx-container {
+.checklist-math-container {
   font-size: 1em;
 }
 
@@ -334,13 +344,13 @@
 }
 
 /* $$display$$ math is a block of its own: underline the formula there. */
-.checklist-text:hover .checklist-inline-math:has(mjx-container[display="true"]),
-.checklist-heading:hover .checklist-inline-math:has(mjx-container[display="true"]) {
+.checklist-text:hover .checklist-inline-math.is-display,
+.checklist-heading:hover .checklist-inline-math.is-display {
   background: none;
 }
 
-.checklist-text:hover .checklist-inline-math mjx-container[display="true"] mjx-math,
-.checklist-heading:hover .checklist-inline-math mjx-container[display="true"] mjx-math {
+.checklist-text:hover .checklist-inline-math.is-display .checklist-math-body,
+.checklist-heading:hover .checklist-inline-math.is-display .checklist-math-body {
   border-bottom: 1px solid currentColor;
 }
 
@@ -362,7 +372,8 @@
   justify-content: center;
   width: 20px;
   height: 20px;
-  margin-top: 1px;
+  align-self: flex-start;
+  margin-top: round(calc((var(--checklist-line-height) - 20px) / 2), 1px);
   color: var(--text-faint);
   cursor: pointer;
   opacity: 0;
