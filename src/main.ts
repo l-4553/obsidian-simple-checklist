@@ -18,6 +18,7 @@ import {
   TFile,
   WorkspaceLeaf,
 } from "obsidian";
+import { formatNoteTitle } from "./note-title";
 
 // Obsidian re-exports its bundled moment instance. Some type-checkers — including
 // the community plugin review scanner — widen that re-export to `any`, which trips
@@ -148,6 +149,7 @@ interface ChecklistSettings {
   sortMode: SortMode;
   // Show note titles and dividers; off shows only the todos ("bare" mode).
   showNoteTitles: boolean;
+  showParentFolder: boolean;
   // Group each note's todos under the nearest heading above them.
   showHeadings: boolean;
   dateNotesOnly: boolean;
@@ -178,6 +180,7 @@ const DEFAULT_SETTINGS: ChecklistSettings = {
   todoScope: "vault",
   sortMode: "recent",
   showNoteTitles: true,
+  showParentFolder: false,
   showHeadings: false,
   dateNotesOnly: false,
   hideFutureDateNotes: false,
@@ -1038,6 +1041,7 @@ class ChecklistView extends ItemView {
     for (let gi = 0; gi < orderedPaths.length; gi++) {
       const filePath = orderedPaths[gi];
       const items = grouped.get(filePath)!;
+      const noteTitle = formatNoteTitle(items[0].file, this.plugin.settings.showParentFolder);
 
       if (gi > 0) this.wrapper.appendChild(createDiv({ cls: "checklist-divider" }));
 
@@ -1047,7 +1051,7 @@ class ChecklistView extends ItemView {
         const group = createDiv({ cls: "checklist-group" });
         const header = group.createDiv({ cls: "checklist-group-header" });
         this.buildFoldToggle(header, foldKey(filePath));
-        const title = header.createDiv({ cls: "checklist-group-title", text: items[0].file.basename });
+        const title = header.createDiv({ cls: "checklist-group-title", text: noteTitle });
         const titleFile = items[0].file;
         title.addEventListener("click", () => { void this.plugin.navigateToFile(titleFile); });
 
@@ -1063,7 +1067,7 @@ class ChecklistView extends ItemView {
         this.groupEls.set(filePath, groupData);
         this.setupGroupDrop(group, items[0].file);
       } else {
-        groupData.title.setText(items[0].file.basename);
+        groupData.title.setText(noteTitle);
       }
 
       groupData.group.classList.toggle("is-pinned", pinned.includes(filePath));
@@ -2301,7 +2305,7 @@ export default class ChecklistPlugin extends Plugin {
   async updateSetting<K extends EditableSettingKey>(key: K, value: ChecklistSettings[K]): Promise<void> {
     this.settings[key] = value;
     await this.saveSettings();
-    if (key === "showNoteTitles" || key === "showHeadings" || key === "showCompleted") this.refreshView();
+    if (key === "showNoteTitles" || key === "showParentFolder" || key === "showHeadings" || key === "showCompleted") this.refreshView();
     else if (key === "movePastTodosToToday") {
       if (value) await this.runRollOverToToday();
     } else this.applySettingsToViews();
@@ -2372,6 +2376,11 @@ class ChecklistSettingTab extends PluginSettingTab {
             name: "Show note titles",
             desc: "Group todos under their note's title. Also toggled from the panel header.",
             control: { type: "toggle", key: "showNoteTitles" },
+          },
+          {
+            name: "Show parent folder",
+            desc: "Show the immediate parent folder alongside each note title.",
+            control: { type: "toggle", key: "showParentFolder" },
           },
           {
             name: "Show headings",
