@@ -29,6 +29,7 @@ An actively maintained Obsidian plugin that collects all open `- [ ]` todos acro
 
 - **Note sort order** — order groups by most/least recently modified, or note name (A–Z / Z–A)
 - **Show note titles** (on by default) — group todos under their note's title. When off, only the todos are shown and dragging only reorders within a note. Also toggled from the panel header button or the **Toggle note titles in Checklist panel** command
+- **Show parent folder** (off by default) — prefix note titles with the immediate parent folder. Root-level notes show just the note title
 - **Show headings** (off by default) — group todos under the nearest heading above them; click a heading to jump to it. Priority sorting then applies per heading
 - **Show completed todos** — **None** (default), **Today**, **Last 3 days**, **This week**, **Last 7 days**, **This month**, **Last 30 days** or **All**. Todos checked off in that time span stay in the panel, greyed out below the open todos of their note (or of their heading, with **Show headings** on), most recently checked off first; click the checkbox to uncheck one. The time a todo is checked off (in the panel or the note) is always recorded for the last 30 days, so switching the setting shows past completions right away. **All** also shows every other checked-off todo in your notes. A completed todo stays linked to its line when lines shift, the note is renamed, the todo is edited or moved to another note
 
